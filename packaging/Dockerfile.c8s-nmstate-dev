@@ -1,6 +1,6 @@
 FROM quay.io/centos/centos:stream8
 
-RUN echo "2022-09-22" > /build_time
+RUN echo "2023-09-08" > /build_time
 
 RUN sed -i -e 's/^#RateLimitInterval=.*/RateLimitInterval=0/' \
     -e 's/^#RateLimitBurst=.*/RateLimitBurst=0/' \
@@ -20,13 +20,14 @@ RUN dnf update -y && \
                    rust-toolset \
                    NetworkManager \
                    NetworkManager-ovs \
-                   NetworkManager-team \
-                   NetworkManager-config-server \
+                   libreswan \
+                   NetworkManager-libreswan \
                    openvswitch2.11 \
                    systemd-udev \
                    python3-devel \
                    python3-pyyaml \
                    python3-setuptools \
+                   python3-gobject-base \
                    python36 \
                    dnsmasq \
                    git \
@@ -45,16 +46,13 @@ RUN dnf update -y && \
                    && \
     alternatives --set python /usr/bin/python3 && \
     ln -s /usr/bin/pytest-3 /usr/bin/pytest && \
-    dnf clean all && \
-    systemctl enable openvswitch
+    dnf clean all
 
 COPY network_manager_enable_trace.conf \
      /etc/NetworkManager/conf.d/97-trace-logging.conf
 COPY network_manager_keyfile.conf \
      /etc/NetworkManager/conf.d/96-keyfile.conf
 
-RUN systemctl enable dbus systemd-udevd NetworkManager
-
-VOLUME [ "/sys/fs/cgroup" ]
+RUN systemctl enable dbus systemd-udevd NetworkManager ipsec openvswitch
 
 CMD ["/usr/sbin/init"]

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryFrom;
+use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::{
-    BaseInterface, BridgePortVlanConfig, ErrorKind, Interface, InterfaceType,
-    MergedInterface, NmstateError, OvsDbIfaceConfig,
+    BaseInterface, BridgePortVlanConfig, ErrorKind, Interface, InterfaceState,
+    InterfaceType, LinuxBridgeStpOptions, MergedInterface, MergedInterfaces,
+    NmstateError, OvsDbIfaceConfig,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +97,7 @@ impl OvsBridgeInterface {
         ret
     }
 
-    fn sort_ports(&mut self) {
+    pub(crate) fn sort_ports(&mut self) {
         if let Some(ref mut br_conf) = self.bridge {
             if let Some(ref mut port_confs) = &mut br_conf.ports {
                 port_confs.sort_unstable_by_key(|p| p.name.clone());
@@ -109,14 +110,32 @@ impl OvsBridgeInterface {
         }
     }
 
-    // * OVS Bridge cannot have MTU, IP
-    pub(crate) fn sanitize(&mut self) -> Result<(), NmstateError> {
+    // * OVS Bridge cannot have MTU, IP or MAC address
+    pub(crate) fn sanitize(
+        &mut self,
+        is_desired: bool,
+    ) -> Result<(), NmstateError> {
         if let Some(mtu) = self.base.mtu.as_ref() {
-            log::warn!(
-                "OVS Bridge {} could not hold 'mtu:{mtu}' configuration as it \
-                only exists in OVS database, ignoring",
-                self.base.name.as_str()
-            );
+            if is_desired {
+                log::warn!(
+                    "OVS Bridge {} could not hold 'mtu:{mtu}' configuration \
+                    as it only exists in OVS database, ignoring",
+                    self.base.name.as_str()
+                );
+            }
+        }
+        if let Some(mac) = self.base.mac_address.as_ref() {
+            if !mac.is_empty() && is_desired {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    format!(
+                        "OVS Bridge {} can not hold MAC address, \
+                        please set MAC address on OVS internal interface \
+                        instead",
+                        self.base.name.as_str()
+                    ),
+                ));
+            }
         }
         self.base.mtu = None;
         self.base.ipv4 = None;
@@ -130,25 +149,11 @@ impl OvsBridgeInterface {
         {
             for port_conf in port_confs {
                 if let Some(vlan_conf) = port_conf.vlan.as_ref() {
-                    vlan_conf.sanitize()?;
+                    vlan_conf.sanitize(is_desired)?;
                 }
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn sanitize_for_verify(&mut self) {
-        if let Some(port_confs) = self
-            .bridge
-            .as_mut()
-            .and_then(|br_conf| br_conf.ports.as_mut())
-        {
-            for port_conf in port_confs {
-                if let Some(bond_conf) = port_conf.bond.as_mut() {
-                    bond_conf.sanitize_for_verify();
-                }
-            }
-        }
     }
 
     // Only support remove non-bonding port or the bond itself as bond require
@@ -234,7 +239,7 @@ impl OvsBridgeInterface {
                         if cur_port_conf.name.as_str()
                             == des_port_conf.name.as_str()
                         {
-                            new_port.vlan = cur_port_conf.vlan.clone();
+                            new_port.vlan.clone_from(&cur_port_conf.vlan);
                             break;
                         }
                     }
@@ -254,6 +259,14 @@ impl OvsBridgeInterface {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 #[non_exhaustive]
 pub struct OvsBridgeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Only validate for applying, when set to `true`, extra OVS patch ports
+    /// will not fail the verification. Default is false.
+    /// This property will not be persisted, every time you modify
+    /// ports of specified OVS bridge, you need to explicitly define this
+    /// property if not using default value.
+    /// Deserialize from `allow-extra-patch-ports`.
+    pub allow_extra_patch_ports: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<OvsBridgeOptions>,
     #[serde(
@@ -278,9 +291,9 @@ pub struct OvsBridgeOptions {
     #[serde(
         skip_serializing_if = "Option::is_none",
         default,
-        deserialize_with = "crate::deserializer::option_bool_or_string"
+        deserialize_with = "ovs_stp_deserializer"
     )]
-    pub stp: Option<bool>,
+    pub stp: Option<OvsBridgeStpOptions>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         default,
@@ -429,8 +442,11 @@ impl OvsInterface {
     // OVS patch interface cannot have MTU or IP configuration
     // OVS DPDK `n_rxq_desc` and `n_txq_desc` should be power of 2 within
     // 1-4096.
-    pub(crate) fn sanitize(&self) -> Result<(), NmstateError> {
-        if self.patch.is_some() {
+    pub(crate) fn sanitize(
+        &self,
+        is_desired: bool,
+    ) -> Result<(), NmstateError> {
+        if is_desired && self.patch.is_some() {
             if self.base.mtu.is_some() {
                 let e = NmstateError::new(
                     ErrorKind::InvalidArgument,
@@ -459,14 +475,16 @@ impl OvsInterface {
             }
         }
         if let Some(dpdk_conf) = self.dpdk.as_ref() {
-            dpdk_conf.sanitize()?;
+            dpdk_conf.sanitize(is_desired)?;
         }
         Ok(())
     }
+
+    pub(crate) fn is_ovs_patch_port(&self) -> bool {
+        self.patch.is_some()
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[non_exhaustive]
 /// The example yaml output of OVS bond:
 /// ```yml
 /// ---
@@ -491,6 +509,9 @@ impl OvsInterface {
 ///           - name: eth2
 ///           - name: eth1
 /// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct OvsBridgeBondConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<OvsBridgeBondMode>,
@@ -544,13 +565,6 @@ impl OvsBridgeBondConfig {
     pub(crate) fn sort_ports(&mut self) {
         if let Some(ref mut bond_ports) = self.ports {
             bond_ports.sort_unstable_by_key(|p| p.name.clone())
-        }
-    }
-
-    pub(crate) fn sanitize_for_verify(&mut self) {
-        // None ovsbd equal to empty
-        if self.ovsdb.is_none() {
-            self.ovsdb = Some(OvsDbIfaceConfig::empty());
         }
     }
 }
@@ -673,12 +687,17 @@ fn validate_dpdk_queue_desc(
 }
 
 impl OvsDpdkConfig {
-    pub(crate) fn sanitize(&self) -> Result<(), NmstateError> {
-        if let Some(n_rxq_desc) = self.n_rxq_desc {
-            validate_dpdk_queue_desc(n_rxq_desc, "n_rxq_desc")?;
-        }
-        if let Some(n_txq_desc) = self.n_txq_desc {
-            validate_dpdk_queue_desc(n_txq_desc, "n_txq_desc")?;
+    pub(crate) fn sanitize(
+        &self,
+        is_desired: bool,
+    ) -> Result<(), NmstateError> {
+        if is_desired {
+            if let Some(n_rxq_desc) = self.n_rxq_desc {
+                validate_dpdk_queue_desc(n_rxq_desc, "n_rxq_desc")?;
+            }
+            if let Some(n_txq_desc) = self.n_txq_desc {
+                validate_dpdk_queue_desc(n_txq_desc, "n_txq_desc")?;
+            }
         }
         Ok(())
     }
@@ -750,5 +769,98 @@ impl MergedInterface {
                 }
             }
         }
+    }
+}
+
+impl MergedInterfaces {
+    // This function remove extra(undesired) ovs patch port from pre-apply
+    // current, so it will not interfere with port change.
+    pub(crate) fn process_allow_extra_ovs_patch_ports_for_apply(&mut self) {
+        let mut ovs_patch_port_names: HashSet<String> = HashSet::new();
+        for cur_iface in self.iter().filter_map(|i| {
+            if let Some(Interface::OvsInterface(o)) = i.current.as_ref() {
+                Some(o)
+            } else {
+                None
+            }
+        }) {
+            if cur_iface.is_ovs_patch_port() {
+                ovs_patch_port_names.insert(cur_iface.base.name.to_string());
+            }
+        }
+
+        for merged_iface in self.iter_mut().filter(|i| {
+            if let Some(Interface::OvsBridge(o)) = i.desired.as_ref() {
+                o.base.state == InterfaceState::Up
+                    && o.bridge.as_ref().and_then(|c| c.allow_extra_patch_ports)
+                        == Some(true)
+            } else {
+                false
+            }
+        }) {
+            if let (Some(des_iface), Some(cur_iface)) =
+                (merged_iface.desired.as_ref(), merged_iface.current.as_mut())
+            {
+                let mut ports_to_delete: HashSet<String> = HashSet::new();
+                if let (Some(des_ports), Some(cur_ports)) =
+                    (des_iface.ports(), cur_iface.ports())
+                {
+                    for cur_port_name in cur_ports {
+                        if ovs_patch_port_names.contains(cur_port_name)
+                            && !des_ports.contains(&cur_port_name)
+                        {
+                            ports_to_delete.insert(cur_port_name.to_string());
+                        }
+                    }
+                }
+                for port_name in ports_to_delete.iter() {
+                    cur_iface.remove_port(port_name);
+                }
+            }
+        }
+    }
+}
+
+pub type OvsBridgeStpOptions = LinuxBridgeStpOptions;
+
+impl OvsBridgeStpOptions {
+    pub(crate) fn new_enabled(enabled: bool) -> Self {
+        Self {
+            enabled: Some(enabled),
+            ..Default::default()
+        }
+    }
+}
+
+pub(crate) fn ovs_stp_deserializer<'de, D>(
+    deserializer: D,
+) -> Result<Option<OvsBridgeStpOptions>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(deserializer)?;
+
+    match v {
+        serde_json::Value::Bool(enabled) => {
+            Ok(Some(OvsBridgeStpOptions::new_enabled(enabled)))
+        }
+        serde_json::Value::String(v) => match v.to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "y" => {
+                Ok(Some(OvsBridgeStpOptions::new_enabled(true)))
+            }
+            "0" | "false" | "no" | "off" | "n" => {
+                Ok(Some(OvsBridgeStpOptions::new_enabled(true)))
+            }
+            _ => Err(de::Error::custom(
+                "Need to be boolean: 1|0|true|false|yes|no|on|off|y|n",
+            )),
+        },
+        serde_json::Value::Object(_) => Ok(Some(
+            OvsBridgeStpOptions::deserialize(v)
+                .map_err(serde::de::Error::custom)?,
+        )),
+        _ => Err(de::Error::custom(
+            "Need to be boolean or map like {enabled: true}",
+        )),
     }
 }

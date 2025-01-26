@@ -1,21 +1,4 @@
-#
-# Copyright (c) 2019-2021 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 import time
 
@@ -29,12 +12,12 @@ from libnmstate.schema import Interface
 from libnmstate.schema import VXLAN
 
 from .testlib import assertlib
+from .testlib.apply import apply_with_description
 from .testlib.bondlib import bond_interface
 from .testlib.cmdlib import RC_SUCCESS
 from .testlib.cmdlib import exec_cmd
 from .testlib.cmdlib import format_exec_cmd_result
 from .testlib.env import is_k8s
-from .testlib.env import nm_major_minor_version
 from .testlib.vxlan import VxlanState
 from .testlib.vxlan import vxlan_interfaces
 from .testlib.vxlan import vxlans_absent
@@ -72,6 +55,28 @@ def test_add_and_remove_two_vxlans_on_same_iface(eth1_up):
 
 
 @pytest.mark.tier1
+def test_add_and_remove_vxlan_without_base_if():
+    with vxlan_interfaces(
+        VxlanState(id=VXLAN1_ID, remote="192.168.100.1"),
+    ) as desired_state:
+        assertlib.assert_state(desired_state)
+
+    vxlan1_ifname = desired_state[Interface.KEY][0][Interface.NAME]
+    assertlib.assert_absent(vxlan1_ifname)
+
+
+@pytest.mark.tier1
+def test_add_and_remove_vxlan_nolearning():
+    with vxlan_interfaces(
+        VxlanState(id=VXLAN1_ID, remote="192.168.100.1", learning=False),
+    ) as desired_state:
+        assertlib.assert_state(desired_state)
+
+    vxlan1_ifname = desired_state[Interface.KEY][0][Interface.NAME]
+    assertlib.assert_absent(vxlan1_ifname)
+
+
+@pytest.mark.tier1
 @pytest.mark.xfail(
     is_k8s(),
     reason=(
@@ -104,7 +109,9 @@ def test_set_vxlan_iface_down(eth1_up):
     vxlan = VxlanState(id=VXLAN1_ID, base_if=ifname, remote="192.168.100.1")
     with vxlan_interfaces(vxlan):
         desired_state = vxlans_down([vxlan])
-        libnmstate.apply(desired_state)
+        apply_with_description(
+            "Bring down the vxlan interface eth1.201", desired_state
+        )
         assertlib.assert_absent(vxlan.name)
 
 
@@ -119,7 +126,13 @@ def test_add_new_bond_iface_with_vxlan(eth1_up):
             desired_state[Interface.KEY].append(
                 bond_desired_state[Interface.KEY][0]
             )
-            libnmstate.apply(desired_state)
+            apply_with_description(
+                "Create bond interface bond0 with bonding mode balance-rr "
+                "and port eth1 attached, create the vxlan interface "
+                "bond0.201 with vxlan ID 201, remote set to 192.168.100.2, "
+                "learning set to true, and the destination-port set to 4789",
+                desired_state,
+            )
             assertlib.assert_state_match(desired_state)
 
     assertlib.assert_absent(vxlan.name)
@@ -140,8 +153,21 @@ def test_show_vxlan_with_no_remote(eth1_up):
         desired_state = vxlans_down([vxlan])
         assertlib.assert_state(desired_state)
     finally:
-        libnmstate.apply(vxlans_absent([vxlan]))
+        apply_with_description(
+            "Remove the vxlan interface eth1.201", vxlans_absent([vxlan])
+        )
         assertlib.assert_absent(vxlan.name)
+
+
+@pytest.mark.tier1
+def test_add_and_remove_vxlan_with_no_remote():
+    with vxlan_interfaces(
+        VxlanState(id=VXLAN1_ID, local="192.168.100.1"),
+    ) as desired_state:
+        assertlib.assert_state(desired_state)
+
+    vxlan1_ifname = desired_state[Interface.KEY][0][Interface.NAME]
+    assertlib.assert_absent(vxlan1_ifname)
 
 
 @pytest.mark.tier1
@@ -152,7 +178,10 @@ def test_add_vxlan_and_modify_vxlan_id(eth1_up):
     ) as desired_state:
         assertlib.assert_state(desired_state)
         desired_state[Interface.KEY][0][VXLAN.CONFIG_SUBTREE][VXLAN.ID] = 200
-        libnmstate.apply(desired_state)
+        apply_with_description(
+            "Set the vxlan ID to 200 for vxlan interface eth1.201",
+            desired_state,
+        )
         assertlib.assert_state(desired_state)
 
     vxlan1_ifname = desired_state[Interface.KEY][0][Interface.NAME]
@@ -160,21 +189,23 @@ def test_add_vxlan_and_modify_vxlan_id(eth1_up):
 
 
 @pytest.mark.tier1
-@pytest.mark.skipif(
-    nm_major_minor_version() < 1.31,
-    reason="Modifying accept-all-mac-addresses is not supported on NM.",
-)
 def test_vxlan_enable_and_disable_accept_all_mac_addresses(eth1_up):
     ifname = eth1_up[Interface.KEY][0][Interface.NAME]
     with vxlan_interfaces(
         VxlanState(id=VXLAN1_ID, base_if=ifname, remote="192.168.100.1")
     ) as d_state:
         d_state[Interface.KEY][0][Interface.ACCEPT_ALL_MAC_ADDRESSES] = True
-        libnmstate.apply(d_state)
+        apply_with_description(
+            "Enable accepting all mac address for vxlan device eth1.201",
+            d_state,
+        )
         assertlib.assert_state(d_state)
 
         d_state[Interface.KEY][0][Interface.ACCEPT_ALL_MAC_ADDRESSES] = False
-        libnmstate.apply(d_state)
+        apply_with_description(
+            "Disable accepting all mac address for vxlan interface eth1.201",
+            d_state,
+        )
         assertlib.assert_state(d_state)
 
     vxlan1_ifname = d_state[Interface.KEY][0][Interface.NAME]

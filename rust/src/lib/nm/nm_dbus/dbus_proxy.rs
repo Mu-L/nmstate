@@ -14,6 +14,9 @@ trait NetworkManager {
     fn version(&self) -> zbus::Result<String>;
 
     #[dbus_proxy(property)]
+    fn version_info(&self) -> zbus::Result<Vec<u32>>;
+
+    #[dbus_proxy(property)]
     fn active_connections(
         &self,
     ) -> zbus::Result<Vec<zvariant::OwnedObjectPath>>;
@@ -59,12 +62,6 @@ trait NetworkManager {
         &self,
         active_connection: &zvariant::ObjectPath,
     ) -> zbus::Result<()>;
-
-    /// GetDeviceByIpIface method
-    fn get_device_by_ip_iface(
-        &self,
-        iface: &str,
-    ) -> zbus::Result<zvariant::OwnedObjectPath>;
 
     /// GetAllDevices method
     fn get_all_devices(&self) -> zbus::Result<Vec<zvariant::OwnedObjectPath>>;

@@ -1,51 +1,35 @@
-#
-# Copyright (c) 2019 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 from contextlib import contextmanager
 from functools import wraps
+from tempfile import TemporaryFile
 import json
 import subprocess
-import threading
 import time
 
+from libnmstate.schema import Interface
+from libnmstate.schema import InterfaceType
+
 from .cmdlib import exec_cmd
+from .statelib import show_only
 
 
-TIMEOUT = 10
-
-
-class IpMonitorResult:
-    def __init__(self):
-        self.out = None
-        self.err = None
-        self.popen = None
-
-
-def ip_monitor_assert_stable_link_up(dev, timeout=10):
+def ip_monitor_assert_stable_link_up(dev):
     def decorator(func):
         @wraps(func)
         def wrapper_ip_monitor(*args, **kwargs):
-            with ip_monitor("link", dev, timeout) as result:
-                func(*args, **kwargs)
-            assert len(get_non_up_events(result, dev)) == 0, (
-                "result: " + result.out
-            )
+            iface_state = show_only((dev,))[Interface.KEY][0]
+            assert iface_state[Interface.TYPE] not in [
+                InterfaceType.ETHERNET,
+                InterfaceType.VETH,
+            ]
+            with TemporaryFile() as fd:
+                with ip_monitor(fd):
+                    func(*args, **kwargs)
+                result = fd.read().decode()
+                assert (
+                    len(get_non_up_events(result, dev)) == 0
+                ), f"result: {result}"
 
         return wrapper_ip_monitor
 
@@ -53,58 +37,32 @@ def ip_monitor_assert_stable_link_up(dev, timeout=10):
 
 
 @contextmanager
-def ip_monitor(object_type, dev, timeout=10):
-    result = IpMonitorResult()
-
-    cmds = "timeout {} ip monitor {} dev {}".format(timeout, object_type, dev)
-
-    def run():
-        result.popen = subprocess.Popen(
-            cmds.split(),
-            close_fds=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=None,
-        )
-        result.out, result.err = result.popen.communicate(None)
-        result.out = result.out.decode("utf-8")
-        result.err = result.err.decode("utf-8")
-
-    def finalize():
-        if result.popen:
-            result.popen.terminate()
-
-    with _thread(run, "ip-monitor", teardown_cb=finalize):
-        # Let the ip monitor thread start before proceeding to the action.
-        time.sleep(1)
-        yield result
+def ip_monitor(fd):
+    # The link might not created yet before test function starts, hence
+    # we monitor on all links.
+    p = subprocess.Popen(
+        "ip monitor link".split(),
+        close_fds=True,
+        stdout=fd,
+        env=None,
+    )
+    # Wait ip monitor to be started
+    time.sleep(1)
+    yield
+    fd.flush()
+    fd.seek(0)
+    p.terminate()
 
 
-def get_non_up_events(result, dev):
+def get_non_up_events(content, dev):
     """
-    Given a result and device, filter only the non UP events (DOWN, UNKNOWN)
-    and return them as a list.
-    :param result: IpMonitorResult
-    :return: List of non UP events
+    Check whether ip monitor output contains lines other than "state UP"
     """
     return [
         line
-        for line in result.out.split("\n")
+        for line in content.split("\n")
         if "state UP" not in line and dev in line
     ]
-
-
-@contextmanager
-def _thread(func, name, teardown_cb=lambda: None):
-    t = threading.Thread(target=func, name=name)
-    t.daemon = True
-    t.start()
-    try:
-        yield t
-    finally:
-        teardown_cb()
-        t.join()
 
 
 def iproute_get_ip_addrs_with_order(iface, is_ipv6):

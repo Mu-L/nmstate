@@ -5,8 +5,13 @@ mod apply;
 #[cfg(feature = "query_apply")]
 mod autoconf;
 mod error;
+mod format;
 #[cfg(feature = "gen_conf")]
 mod gen_conf;
+#[cfg(feature = "gen_revert")]
+mod gen_revert;
+#[cfg(feature = "query_apply")]
+pub(crate) mod persist_nic;
 #[cfg(feature = "query_apply")]
 mod policy;
 #[cfg(feature = "query_apply")]
@@ -14,6 +19,9 @@ mod query;
 mod result;
 #[cfg(feature = "query_apply")]
 mod service;
+mod state;
+#[cfg(feature = "query_apply")]
+mod statistic;
 
 use env_logger::Builder;
 use log::LevelFilter;
@@ -26,6 +34,8 @@ use crate::apply::{
 use crate::autoconf::autoconf;
 #[cfg(feature = "gen_conf")]
 use crate::gen_conf::gen_conf;
+#[cfg(feature = "gen_revert")]
+use crate::gen_revert::gen_revert;
 #[cfg(feature = "query_apply")]
 use crate::policy::policy;
 #[cfg(feature = "query_apply")]
@@ -33,6 +43,8 @@ use crate::query::show;
 use crate::result::print_result_and_exit;
 #[cfg(feature = "query_apply")]
 use crate::service::ncl_service;
+#[cfg(feature = "query_apply")]
+use crate::statistic::statistic;
 
 pub(crate) const DEFAULT_SERVICE_FOLDER: &str = "/etc/nmstate";
 pub(crate) const CONFIG_FOLDER_KEY: &str = "CONFIG_FOLDER";
@@ -48,7 +60,11 @@ const SUB_CMD_EDIT: &str = "edit";
 const SUB_CMD_VERSION: &str = "version";
 const SUB_CMD_AUTOCONF: &str = "autoconf";
 const SUB_CMD_SERVICE: &str = "service";
+const SUB_CMD_PERSIST_NIC_NAMES: &str = "persist-nic-names";
 const SUB_CMD_POLICY: &str = "policy";
+const SUB_CMD_FORMAT: &str = "format";
+const SUB_CMD_GEN_REVERT: &str = "gr";
+const SUB_CMD_STATISTIC: &str = "statistic";
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
@@ -59,7 +75,7 @@ fn main() {
         print_result_and_exit(autoconf(&argv[1..]));
     }
 
-    let matches = clap::Command::new(APP_NAME)
+    let mut app = clap::Command::new(APP_NAME)
         .version(clap::crate_version!())
         .author("Gris Ge <fge@redhat.com>")
         .about("Command line of nmstate")
@@ -80,12 +96,13 @@ fn main() {
         .subcommand(
             clap::Command::new(SUB_CMD_AUTOCONF)
                 .about(
-                    "Automatically configure network base on LLDP \
-                    information(experimental)")
+                    "Automatically configure network based on LLDP \
+                    information (experimental)")
         )
         .subcommand(
             clap::Command::new(SUB_CMD_SHOW)
                 .about("Show network state")
+                .alias("s")
                 .arg(
                     clap::Arg::new("IFNAME")
                         .index(1)
@@ -122,6 +139,7 @@ fn main() {
         .subcommand(
             clap::Command::new(SUB_CMD_APPLY)
                 .about("Apply network state or network policy")
+                .alias("a")
                 .alias("set")
                 .arg(
                     clap::Arg::new("STATE_FILE")
@@ -158,7 +176,6 @@ fn main() {
                     clap::Arg::new("TIMEOUT")
                       .long("timeout")
                       .takes_value(true)
-                      .default_value("60")
                       .help(
                         "Timeout in seconds before reverting uncommited changes."
                       ),
@@ -175,6 +192,15 @@ fn main() {
                         .long("memory-only")
                         .takes_value(false)
                         .help("Do not make the state persistent"),
+                )
+                .arg(
+                    clap::Arg::new("OVERRIDE_IFACE")
+                        .long("override-iface")
+                        .takes_value(false)
+                        .help(
+                            "Override interface settings \
+                            without merge current network state"
+                        ),
                 )
         )
         .subcommand(
@@ -199,7 +225,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new(SUB_CMD_ROLLBACK)
-                .about("Commit a change")
+                .about("Rollback a change")
                 .arg(
                     clap::Arg::new("CHECKPOINT")
                         .required(false)
@@ -302,9 +328,122 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new(SUB_CMD_FORMAT)
+                .about("Format specified state and print out")
+                .alias("f")
+                .alias("fmt")
+                .arg(
+                    clap::Arg::new("STATE_FILE")
+                        .index(1)
+                        .default_value("-")
+                        .help("Network state file"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new(SUB_CMD_GEN_REVERT)
+                .alias("gr")
+                .about("Generate network state to revert the desire state")
+                .arg(
+                    clap::Arg::new("STATE_FILE")
+                        .required(true)
+                        .index(1)
+                        .help("Network state file"),
+                )
+                .arg(
+                    clap::Arg::new("CURRENT_STATE")
+                        .short('c')
+                        .long("current")
+                        .takes_value(true)
+                        .help("Read current network state from file"),
+                )
+                .arg(
+                    clap::Arg::new("JSON")
+                        .long("json")
+                        .takes_value(false)
+                        .help("Show state in json format"),
+                )
+        )
+   .subcommand(
+            clap::Command::new(SUB_CMD_STATISTIC)
+                .alias("st")
+                .about("Generate statistic of specified desire states")
+                .arg(
+                    clap::Arg::new("STATE_FILE")
+                        .required(true)
+                        .multiple_occurrences(true)
+                        .index(1)
+                        .help("Network state file (repeatable)"),
+                )
+                .arg(
+                    clap::Arg::new("CURRENT_STATE")
+                        .short('c')
+                        .long("current")
+                        .takes_value(true)
+                        .help("Read current network state from file"),
+                )
+                .arg(
+                    clap::Arg::new("JSON")
+                        .long("json")
+                        .takes_value(false)
+                        .help("Show statistic in json format"),
+                )
+        )
+        .subcommand(
             clap::Command::new(SUB_CMD_VERSION)
             .about("Show version")
-       ).get_matches();
+       );
+    if cfg!(feature = "query_apply") {
+        app = app.subcommand(
+            clap::Command::new(SUB_CMD_PERSIST_NIC_NAMES)
+                .about(
+                    "Generate .link files which persist active network \
+                    interfaces to their current names",
+                )
+                .arg(
+                    clap::Arg::new("DRY_RUN")
+                        .long("dry-run")
+                        .takes_value(false)
+                        .help("Only output changes that would be made"),
+                )
+                .arg(
+                    clap::Arg::new("INSPECT")
+                        .long("inspect")
+                        .takes_value(false)
+                        .help("Output information about prior state, if any"),
+                )
+                .arg(
+                    clap::Arg::new("CLEAN_UP")
+                        .long("cleanup")
+                        .takes_value(false)
+                        .help(
+                            "Remove previously created .link files \
+                            which has no effect",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("KARGSFILE")
+                        .long("kargs-out")
+                        .takes_value(true)
+                        .help(
+                            "When pinning, write kargs to append; \
+                            when cleaning up, write kargs to delete \
+                            (space-separated)",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("ROOT")
+                        .long("root")
+                        .short('r')
+                        .required(false)
+                        .takes_value(true)
+                        .default_value("/")
+                        .help("Target root filesystem for writing state"),
+                )
+                // We don't want to expose this outside of OCP yet
+                .hide(true),
+        );
+    };
+    let matches = app.get_matches();
     let (log_module_filters, log_level) =
         match matches.occurrences_of("verbose") {
             0 => (vec!["nmstate", "nm_dbus"], LevelFilter::Info),
@@ -323,6 +462,8 @@ fn main() {
         }
         log_builder.init();
     }
+
+    log::info!("Nmstate version: {}", clap::crate_version!());
 
     if let Some(matches) = matches.subcommand_matches(SUB_CMD_GEN_CONF) {
         if let Some(file_path) = matches.value_of("STATE_FILE") {
@@ -363,18 +504,60 @@ fn main() {
         print_result_and_exit(ncl_service(matches));
     } else if let Some(matches) = matches.subcommand_matches(SUB_CMD_POLICY) {
         print_result_and_exit(policy(matches));
+    } else if let Some(matches) = matches.subcommand_matches(SUB_CMD_FORMAT) {
+        // The default_value() has ensured the unwrap() will never fail
+        print_result_and_exit(format::format(
+            matches.value_of("STATE_FILE").unwrap(),
+        ));
+    } else if let Some(matches) = matches.subcommand_matches(SUB_CMD_STATISTIC)
+    {
+        print_result_and_exit(statistic(matches));
     } else if matches.subcommand_matches(SUB_CMD_VERSION).is_some() {
         print_result_and_exit(Ok(format!(
             "{} {}",
             APP_NAME,
             clap::crate_version!()
         )));
+    } else if let Some(matches) = matches.subcommand_matches(SUB_CMD_GEN_REVERT)
+    {
+        print_result_and_exit(gen_revert(matches));
+    } else {
+        // Conditionally-built commands
+        #[cfg(feature = "query_apply")]
+        if let Some(matches) =
+            matches.subcommand_matches(SUB_CMD_PERSIST_NIC_NAMES)
+        {
+            // --inspect is now equivalent to --cleanup --dry-run and kept for
+            // backwards compatibility with the logic that originally landed in https://github.com/openshift/machine-config-operator/
+            let have_inspect = matches.contains_id("INSPECT");
+            let dry_run = matches.contains_id("DRY_RUN") || have_inspect;
+            let action = if matches.contains_id("CLEAN_UP") || have_inspect {
+                persist_nic::PersistAction::CleanUp
+            } else {
+                persist_nic::PersistAction::Save
+            };
+            print_result_and_exit(crate::persist_nic::entrypoint(
+                matches.value_of("ROOT").unwrap(),
+                matches.value_of("KARGSFILE"),
+                action,
+                dry_run,
+            ));
+        }
     }
 }
 
 #[cfg(not(feature = "gen_conf"))]
 fn gen_conf(_file_path: &str) -> Result<String, crate::error::CliError> {
     Err("The gc sub-command require `gen_conf` feature been \
+        enabled during compiling"
+        .into())
+}
+
+#[cfg(not(feature = "gen_revert"))]
+fn gen_revert(
+    _matches: &clap::ArgMatches,
+) -> Result<String, crate::error::CliError> {
+    Err("The gr sub-command require `gen_revert` feature been \
         enabled during compiling"
         .into())
 }
@@ -457,4 +640,15 @@ fn policy(
     Err("The policy sub-command require `query_apply` feature been \
         enabled during compiling"
         .into())
+}
+
+#[cfg(not(feature = "query_apply"))]
+fn statistic(
+    _matches: &clap::ArgMatches,
+) -> Result<String, crate::error::CliError> {
+    Err(
+        "The statistic sub-command require `query-apply` feature been \
+        enabled during compiling"
+            .into(),
+    )
 }

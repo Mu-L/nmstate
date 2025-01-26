@@ -81,12 +81,16 @@ fn apply_absent_rule(
 
         if let Some(apply_iface) = iface.for_apply.as_mut() {
             if apply_iface.base_iface_mut().ipv4.is_none() {
-                apply_iface.base_iface_mut().ipv4 =
-                    cur_iface.base_iface().ipv4.clone();
+                apply_iface
+                    .base_iface_mut()
+                    .ipv4
+                    .clone_from(&cur_iface.base_iface().ipv4);
             }
             if apply_iface.base_iface_mut().ipv6.is_none() {
-                apply_iface.base_iface_mut().ipv6 =
-                    cur_iface.base_iface().ipv6.clone();
+                apply_iface
+                    .base_iface_mut()
+                    .ipv6
+                    .clone_from(&cur_iface.base_iface().ipv6);
             }
         }
 
@@ -168,12 +172,24 @@ fn append_route_rule(
         if let Some(apply_iface) = iface.for_apply.as_mut() {
             if rule.is_ipv6() {
                 if apply_iface.base_iface().ipv6.is_none() {
-                    apply_iface.base_iface_mut().ipv6 =
-                        iface.merged.base_iface_mut().ipv6.clone();
+                    apply_iface
+                        .base_iface_mut()
+                        .ipv6
+                        .clone_from(&iface.merged.base_iface_mut().ipv6);
                 }
                 if let Some(ip_conf) =
                     apply_iface.base_iface_mut().ipv6.as_mut()
                 {
+                    // When desired state has no rules defined, we should
+                    // copy current rules first, then append.
+                    if ip_conf.rules.is_none() {
+                        ip_conf.rules = iface
+                            .merged
+                            .base_iface()
+                            .ipv6
+                            .as_ref()
+                            .and_then(|i| i.rules.clone());
+                    }
                     if let Some(rules) = ip_conf.rules.as_mut() {
                         rules.push(rule.clone());
                     } else {
@@ -182,12 +198,24 @@ fn append_route_rule(
                 }
             } else {
                 if apply_iface.base_iface().ipv4.is_none() {
-                    apply_iface.base_iface_mut().ipv4 =
-                        iface.merged.base_iface_mut().ipv4.clone();
+                    apply_iface
+                        .base_iface_mut()
+                        .ipv4
+                        .clone_from(&iface.merged.base_iface_mut().ipv4);
                 }
                 if let Some(ip_conf) =
                     apply_iface.base_iface_mut().ipv4.as_mut()
                 {
+                    // When desired state has no rules defined, we should
+                    // copy current rules first, then append.
+                    if ip_conf.rules.is_none() {
+                        ip_conf.rules = iface
+                            .merged
+                            .base_iface()
+                            .ipv4
+                            .as_ref()
+                            .and_then(|i| i.rules.clone());
+                    }
                     if let Some(rules) = ip_conf.rules.as_mut() {
                         rules.push(rule.clone());
                     } else {
@@ -201,8 +229,9 @@ fn append_route_rule(
     Ok(())
 }
 
-// * If rule has `iif`, we use that
-// * If rule has table id, we find a interface configured for that route table
+// * If rule has `iif`, we use that interface.
+// * If rule has table id, we find a interface in desire state configured for
+//   that route table
 // * fallback to first desired interface with ip stack enabled.
 // * fallback to use loop interface.
 fn find_interface_for_rule<'a>(
@@ -265,34 +294,6 @@ fn find_interface_for_rule<'a>(
         }
     }
 
-    let mut cur_iface_names: Vec<&str> = merged_state
-        .interfaces
-        .kernel_ifaces
-        .iter()
-        .filter_map(|(n, i)| {
-            if !i.is_changed() {
-                Some(n.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // we should be persistent on choice, hence sort the iface names.
-    cur_iface_names.sort_unstable();
-
-    // Try interfaces in current state
-    for iface_name in cur_iface_names {
-        if iface_has_route_for_table_id(
-            iface_name,
-            merged_state,
-            rule.is_ipv6(),
-            table_id,
-        ) {
-            return Ok(iface_name);
-        }
-    }
-
     // Fallback to first interface in desire state with IP stack enabled.
     for (iface_name, iface_type) in
         merged_state.interfaces.insert_order.as_slice().iter()
@@ -325,7 +326,7 @@ fn iface_has_route_for_table_id(
     is_ipv6: bool,
     table_id: u32,
 ) -> bool {
-    if let Some(routes) = merged_state.routes.indexed.get(iface_name) {
+    if let Some(routes) = merged_state.routes.merged.get(iface_name) {
         for route in routes.as_slice().iter().filter(|r| r.is_ipv6() == is_ipv6)
         {
             if route.table_id == Some(table_id)

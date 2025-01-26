@@ -15,7 +15,9 @@ fn np_iface_type_to_nmstate(
         nispor::IfaceType::Bridge => InterfaceType::LinuxBridge,
         nispor::IfaceType::Dummy => InterfaceType::Dummy,
         nispor::IfaceType::Ethernet => InterfaceType::Ethernet,
+        nispor::IfaceType::Hsr => InterfaceType::Hsr,
         nispor::IfaceType::Loopback => InterfaceType::Loopback,
+        nispor::IfaceType::MacSec => InterfaceType::MacSec,
         nispor::IfaceType::MacVlan => InterfaceType::MacVlan,
         nispor::IfaceType::MacVtap => InterfaceType::MacVtap,
         nispor::IfaceType::OpenvSwitch => InterfaceType::OvsInterface,
@@ -24,16 +26,20 @@ fn np_iface_type_to_nmstate(
         nispor::IfaceType::Vrf => InterfaceType::Vrf,
         nispor::IfaceType::Vxlan => InterfaceType::Vxlan,
         nispor::IfaceType::Ipoib => InterfaceType::InfiniBand,
-        _ => InterfaceType::Other(format!("{np_iface_type:?}")),
+        nispor::IfaceType::Tun => InterfaceType::Tun,
+        nispor::IfaceType::Xfrm => InterfaceType::Xfrm,
+        nispor::IfaceType::IpVlan => InterfaceType::IpVlan,
+        nispor::IfaceType::Other(v) => InterfaceType::Other(v.to_lowercase()),
+        _ => InterfaceType::Other(format!("{np_iface_type:?}").to_lowercase()),
     }
 }
 
-impl From<(&nispor::IfaceState, &[nispor::IfaceFlags])> for InterfaceState {
-    fn from(tuple: (&nispor::IfaceState, &[nispor::IfaceFlags])) -> Self {
+impl From<(&nispor::IfaceState, &[nispor::IfaceFlag])> for InterfaceState {
+    fn from(tuple: (&nispor::IfaceState, &[nispor::IfaceFlag])) -> Self {
         let (state, flags) = tuple;
         if *state == nispor::IfaceState::Up
-            || flags.contains(&nispor::IfaceFlags::Up)
-            || flags.contains(&nispor::IfaceFlags::Running)
+            || flags.contains(&nispor::IfaceFlag::Up)
+            || flags.contains(&nispor::IfaceFlag::Running)
         {
             InterfaceState::Up
         } else if *state == nispor::IfaceState::Down {
@@ -50,6 +56,7 @@ pub(crate) fn np_iface_to_base_iface(
 ) -> BaseInterface {
     let mut base_iface = BaseInterface {
         name: np_iface.name.to_string(),
+        driver: np_iface.driver.clone(),
         state: (&np_iface.state, np_iface.flags.as_slice()).into(),
         iface_type: np_iface_type_to_nmstate(&np_iface.iface_type),
         ipv4: np_ipv4_to_nmstate(np_iface, running_config_only),
@@ -90,30 +97,17 @@ pub(crate) fn np_iface_to_base_iface(
         },
         accept_all_mac_addresses: if np_iface
             .flags
-            .contains(&nispor::IfaceFlags::Promisc)
+            .contains(&nispor::IfaceFlag::Promisc)
         {
             Some(true)
         } else {
             Some(false)
         },
         ethtool: np_ethtool_to_nmstate(np_iface),
-        prop_list: vec![
-            "name",
-            "state",
-            "iface_type",
-            "ipv4",
-            "ipv6",
-            "mac_address",
-            "permanent_mac_address",
-            "controller",
-            "mtu",
-            "accept_all_mac_addresses",
-            "ethtool",
-        ],
         ..Default::default()
     };
     if !InterfaceType::SUPPORTED_LIST.contains(&base_iface.iface_type) {
-        log::info!(
+        log::debug!(
             "Got unsupported interface type {}: {}, ignoring",
             &base_iface.iface_type,
             &base_iface.name
@@ -140,6 +134,6 @@ fn get_permanent_mac_address(iface: &nispor::Iface) -> Option<String> {
             None
         }
     } else {
-        Some(iface.permanent_mac_address.clone())
+        Some(iface.permanent_mac_address.as_str().to_uppercase())
     }
 }

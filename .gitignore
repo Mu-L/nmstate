@@ -17,6 +17,7 @@ ChangeLog
 exported-artifacts
 *.rpm
 doc/nmstatectl.8
+doc/nmstate.service.8
 
 /ansible
 /.vagrant
@@ -40,3 +41,9 @@ doc/nmstate-autoconf.8
 
 nmstate-*.tar.gz
 nmstate-*.tar.gz.asc
+/tags
+
+/.vscode
+
+rust/src/clib/nmstate.pc
+rust/src/python/build

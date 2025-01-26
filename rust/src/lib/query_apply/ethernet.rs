@@ -2,11 +2,19 @@
 
 use crate::{
     ErrorKind, EthernetConfig, EthernetInterface, Interface, InterfaceType,
-    Interfaces, MergedInterface, MergedNetworkState, NmstateError, SrIovConfig,
+    Interfaces, MergedInterfaces, NetworkState, NmstateError, SrIovConfig,
     VethConfig,
 };
 
 impl EthernetInterface {
+    pub(crate) fn sanitize_desired_for_verify(&mut self) {
+        if let Some(sriov_conf) =
+            self.ethernet.as_mut().and_then(|e| e.sr_iov.as_mut())
+        {
+            sriov_conf.sanitize_desired_for_verify();
+        }
+    }
+
     pub(crate) fn sriov_is_enabled(&self) -> bool {
         self.ethernet
             .as_ref()
@@ -20,7 +28,7 @@ impl EthernetInterface {
         if let Some(eth_conf) = &mut self.ethernet {
             eth_conf.update(other.ethernet.as_ref())
         } else {
-            self.ethernet = other.ethernet.clone()
+            self.ethernet.clone_from(&other.ethernet)
         }
     }
 
@@ -28,7 +36,7 @@ impl EthernetInterface {
         if let Some(veth_conf) = &mut self.veth {
             veth_conf.update(other.veth.as_ref());
         } else {
-            self.veth = other.veth.clone();
+            self.veth.clone_from(&other.veth);
         }
     }
 
@@ -51,7 +59,7 @@ impl EthernetConfig {
             if let Some(sr_iov_conf) = &mut self.sr_iov {
                 sr_iov_conf.update(other.sr_iov.as_ref())
             } else {
-                self.sr_iov = other.sr_iov.clone()
+                self.sr_iov.clone_from(&other.sr_iov)
             }
         }
     }
@@ -60,7 +68,7 @@ impl EthernetConfig {
 impl VethConfig {
     fn update(&mut self, other: Option<&VethConfig>) {
         if let Some(other) = other {
-            self.peer = other.peer.clone();
+            self.peer.clone_from(&other.peer);
         }
     }
 }
@@ -101,36 +109,67 @@ impl Interfaces {
     }
 }
 
-impl MergedNetworkState {
-    // Return newly create MergedNetworkState containing only ethernet section
-    // of interface with SR-IOV PF changes.
-    // The self will have SR-IOV PF change removed.
-    pub(crate) fn isolate_sriov_conf_out(&mut self) -> Option<Self> {
-        let mut pf_ifaces: Vec<MergedInterface> = Vec::new();
+impl NetworkState {
+    pub(crate) fn has_sriov_and_missing_eth(&self, current: &Self) -> bool {
+        self.has_sriov(current) && self.has_missing_eth(current)
+    }
 
-        for iface in self.interfaces.kernel_ifaces.values_mut().filter(|i| {
-            i.is_desired() && i.merged.iface_type() == InterfaceType::Ethernet
-        }) {
-            if let Some(Interface::Ethernet(apply_iface)) =
-                iface.for_apply.as_mut()
+    fn has_sriov(&self, current: &Self) -> bool {
+        for iface in
+            self.interfaces.kernel_ifaces.values().filter(|i| i.is_up())
+        {
+            if let (
+                Interface::Ethernet(iface),
+                Some(Interface::Ethernet(cur_iface)),
+            ) = (iface, current.interfaces.kernel_ifaces.get(iface.name()))
             {
-                if let Some(true) =
-                    apply_iface.ethernet.as_ref().map(|e| e.sr_iov.is_some())
-                {
-                    if let Some(eth_conf) = apply_iface.ethernet.as_ref() {
-                        let new_iface = EthernetInterface {
-                            base: apply_iface.base.clone_name_type_only(),
+                if iface.sriov_is_enabled() || cur_iface.sriov_is_enabled() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn has_missing_eth(&self, current: &Self) -> bool {
+        self.interfaces
+            .kernel_ifaces
+            .values()
+            .filter(|i| {
+                i.is_up()
+                    && (i.iface_type() == InterfaceType::Ethernet
+                        || i.iface_type() == InterfaceType::Unknown)
+            })
+            .any(|i| !current.interfaces.kernel_ifaces.contains_key(i.name()))
+    }
+
+    // Return newly create NetworkState containing only ethernet section of
+    // interface with SR-IOV PF changes.
+    pub(crate) fn get_sriov_pf_conf_state(&self) -> Option<Self> {
+        let mut pf_ifaces: Vec<Interface> = Vec::new();
+
+        for iface in self.interfaces.kernel_ifaces.values().filter_map(|i| {
+            if i.is_up() {
+                if let Interface::Ethernet(iface) = i {
+                    Some(iface)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }) {
+            if let Some(true) =
+                iface.ethernet.as_ref().map(|e| e.sr_iov.is_some())
+            {
+                if let Some(eth_conf) = iface.ethernet.as_ref() {
+                    pf_ifaces.push(Interface::Ethernet(Box::new(
+                        EthernetInterface {
+                            base: iface.base.clone_name_type_only(),
                             ethernet: Some(eth_conf.clone()),
                             ..Default::default()
-                        };
-                        if let Ok(new_merged_iface) = MergedInterface::new(
-                            Some(Interface::Ethernet(new_iface)),
-                            iface.current.clone(),
-                        ) {
-                            pf_ifaces.push(new_merged_iface);
-                            apply_iface.ethernet = None;
-                        }
-                    }
+                        },
+                    )));
                 }
             }
         }
@@ -138,18 +177,32 @@ impl MergedNetworkState {
         if pf_ifaces.is_empty() {
             None
         } else {
-            let mut pf_state = MergedNetworkState::default();
+            let mut pf_state = NetworkState::default();
             for pf_iface in pf_ifaces {
-                pf_state.interfaces.insert_order.push((
-                    pf_iface.merged.name().to_string(),
-                    pf_iface.merged.iface_type(),
-                ));
-                pf_state
-                    .interfaces
-                    .kernel_ifaces
-                    .insert(pf_iface.merged.name().to_string(), pf_iface);
+                pf_state.interfaces.push(pf_iface);
             }
+            pf_state.set_override_iface(self.override_iface);
             Some(pf_state)
         }
+    }
+}
+
+impl MergedInterfaces {
+    pub(crate) fn get_sriov_vf_count(&self) -> u32 {
+        let mut ret = 0u32;
+        for iface in self.kernel_ifaces.values().filter(|i| {
+            (i.is_desired() || i.is_changed())
+                && i.merged.iface_type() == InterfaceType::Ethernet
+        }) {
+            if let Interface::Ethernet(iface) = &iface.merged {
+                ret += iface
+                    .ethernet
+                    .as_ref()
+                    .and_then(|e| e.sr_iov.as_ref())
+                    .and_then(|s| s.total_vfs)
+                    .unwrap_or_default();
+            }
+        }
+        ret
     }
 }

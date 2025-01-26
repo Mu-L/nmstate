@@ -1,15 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+
 mod apply;
 mod base_iface;
 mod bond;
+mod dns;
 mod error;
 mod ethernet;
 mod ethtool;
 mod hostname;
+mod hsr;
 mod infiniband;
 mod ip;
+mod ipvlan;
 mod linux_bridge;
 mod linux_bridge_port_vlan;
 mod mac_vlan;
+mod macsec;
 mod mptcp;
 mod route;
 mod route_rule;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::time::SystemTime;
 
 use libc::{c_char, c_int};
@@ -11,8 +11,11 @@ use crate::{
         NMSTATE_FLAG_KERNEL_ONLY, NMSTATE_FLAG_MEMORY_ONLY,
         NMSTATE_FLAG_NO_COMMIT, NMSTATE_FLAG_NO_VERIFY,
     },
+    state::c_str_to_net_state,
     NMSTATE_FAIL, NMSTATE_PASS,
 };
+
+const NMSTATE_FLAG_OVERRIDE_IFACE: u32 = 1 << 9;
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
@@ -51,41 +54,13 @@ pub extern "C" fn nmstate_net_state_apply(
     };
     let now = SystemTime::now();
 
-    let net_state_cstr = unsafe { CStr::from_ptr(state) };
-
-    let net_state_str = match net_state_cstr.to_str() {
+    let mut net_state = match c_str_to_net_state(state, err_kind, err_msg) {
         Ok(s) => s,
-        Err(e) => {
-            unsafe {
-                *err_msg = CString::new(format!(
-                    "Error on converting C char to rust str: {e}"
-                ))
-                .unwrap()
-                .into_raw();
-                *err_kind = CString::new(format!(
-                    "{}",
-                    nmstate::ErrorKind::InvalidArgument
-                ))
-                .unwrap()
-                .into_raw();
-            }
-            return NMSTATE_FAIL;
+        Err(rc) => {
+            return rc;
         }
     };
 
-    let mut net_state =
-        match nmstate::NetworkState::new_from_json(net_state_str) {
-            Ok(n) => n,
-            Err(e) => {
-                unsafe {
-                    *err_msg = CString::new(e.msg()).unwrap().into_raw();
-                    *err_kind = CString::new(format!("{}", &e.kind()))
-                        .unwrap()
-                        .into_raw();
-                }
-                return NMSTATE_FAIL;
-            }
-        };
     if (flags & NMSTATE_FLAG_KERNEL_ONLY) > 0 {
         net_state.set_kernel_only(true);
     }
@@ -100,6 +75,10 @@ pub extern "C" fn nmstate_net_state_apply(
 
     if (flags & NMSTATE_FLAG_MEMORY_ONLY) > 0 {
         net_state.set_memory_only(true);
+    }
+
+    if (flags & NMSTATE_FLAG_OVERRIDE_IFACE) > 0 {
+        net_state.set_override_iface(true);
     }
 
     net_state.set_timeout(rollback_timeout);

@@ -8,6 +8,7 @@ import pytest
 import libnmstate
 from libnmstate.schema import Bond
 from libnmstate.schema import Ethernet
+from libnmstate.schema import Ethtool
 from libnmstate.schema import Interface
 from libnmstate.schema import InterfaceIPv4
 from libnmstate.schema import InterfaceIPv6
@@ -17,13 +18,14 @@ from libnmstate.schema import LinuxBridge
 from libnmstate.schema import OVSBridge
 
 from .testlib import assertlib
-from .testlib import statelib
 from .testlib.bondlib import bond_interface
 from .testlib.bridgelib import add_port_to_bridge
 from .testlib.bridgelib import create_bridge_subtree_state
 from .testlib.bridgelib import linux_bridge
 from .testlib.ovslib import ovs_bridge
 from .testlib.ovslib import ovs_bridge_bond
+from .testlib.sriov import get_sriov_vf_names
+from .testlib.statelib import show_only
 
 MAC1 = "00:11:22:33:44:55"
 MAC2 = "00:11:22:33:44:66"
@@ -121,6 +123,31 @@ def sriov_iface_vf(disable_sriov):
     yield desired_state
 
 
+@pytest.fixture
+def sriov_with_62_vfs():
+    pf_name = _test_nic_name()
+    iface_info = {
+        Interface.NAME: pf_name,
+        Interface.STATE: InterfaceState.UP,
+        Ethernet.CONFIG_SUBTREE: {
+            Ethernet.SRIOV_SUBTREE: {Ethernet.SRIOV.TOTAL_VFS: 62},
+        },
+    }
+    desired_state = {Interface.KEY: [iface_info]}
+    libnmstate.apply(desired_state)
+    yield
+    libnmstate.apply(
+        {
+            Interface.KEY: [
+                {
+                    Interface.NAME: pf_name,
+                    Interface.STATE: InterfaceState.ABSENT,
+                }
+            ]
+        }
+    )
+
+
 @pytest.mark.skipif(
     not os.environ.get("TEST_REAL_NIC"),
     reason="Need to define TEST_REAL_NIC for SR-IOV test",
@@ -189,10 +216,8 @@ class TestSrIov:
         try:
             libnmstate.apply(desired_state)
             assertlib.assert_state_match(desired_state)
-            current_state = statelib.show_only(
-                (f"{pf_name}v0", f"{pf_name}v1")
-            )
-            assert len(current_state[Interface.KEY]) == 2
+            vf_ifaces = get_sriov_vf_names(pf_name)
+            assert len(vf_ifaces) == 2
 
         finally:
             desired_state[Interface.KEY][0][
@@ -215,20 +240,16 @@ class TestSrIov:
         try:
             libnmstate.apply(desired_state)
             assertlib.assert_state_match(desired_state)
-            current_state = statelib.show_only(
-                (f"{pf_name}v0", f"{pf_name}v1")
-            )
-            assert len(current_state[Interface.KEY]) == 2
+            vf_ifaces = get_sriov_vf_names(pf_name)
+            assert len(vf_ifaces) == 2
 
             desired_state[Interface.KEY][0][Ethernet.CONFIG_SUBTREE][
                 Ethernet.SRIOV_SUBTREE
             ][Ethernet.SRIOV.TOTAL_VFS] = 1
             libnmstate.apply(desired_state)
             assertlib.assert_state_match(desired_state)
-            current_state = statelib.show_only(
-                (f"{pf_name}v0", f"{pf_name}v1")
-            )
-            assert len(current_state[Interface.KEY]) == 1
+            vf_ifaces = get_sriov_vf_names(pf_name)
+            assert len(vf_ifaces) == 1
 
         finally:
             desired_state[Interface.KEY][0][
@@ -236,7 +257,7 @@ class TestSrIov:
             ] = InterfaceState.ABSENT
             libnmstate.apply(desired_state)
 
-    def test_sriov_vf_vlan_id_and_qos(self):
+    def test_sriov_vf_vlan_id_and_qos_proto(self):
         pf_name = _test_nic_name()
         desired_state = {
             Interface.KEY: [
@@ -250,11 +271,13 @@ class TestSrIov:
                                     Ethernet.SRIOV.VFS.ID: 0,
                                     Ethernet.SRIOV.VFS.VLAN_ID: 100,
                                     Ethernet.SRIOV.VFS.QOS: 5,
+                                    Ethernet.SRIOV.VFS.VLAN_PROTO: "802.1ad",
                                 },
                                 {
                                     Ethernet.SRIOV.VFS.ID: 1,
                                     Ethernet.SRIOV.VFS.VLAN_ID: 102,
                                     Ethernet.SRIOV.VFS.QOS: 6,
+                                    Ethernet.SRIOV.VFS.VLAN_PROTO: "802.1q",
                                 },
                             ],
                         }
@@ -438,6 +461,7 @@ class TestSrIov:
         iface_infos = [
             {
                 Interface.NAME: pf_name,
+                Interface.TYPE: InterfaceType.ETHERNET,
                 Interface.STATE: InterfaceState.UP,
                 Ethernet.CONFIG_SUBTREE: {
                     Ethernet.SRIOV_SUBTREE: {Ethernet.SRIOV.TOTAL_VFS: 2},
@@ -466,3 +490,74 @@ class TestSrIov:
         ]
         desired_state = {Interface.KEY: iface_infos}
         libnmstate.apply(desired_state)
+
+    # Changing VF from 62 to 63 require massive time as kernel require us
+    # to disable SRIOV before changing VF count, this test is focus on
+    # whether nmstate has enough verification retry.
+    def test_change_vf_from_62_to_63(self, sriov_with_62_vfs):
+        pf_name = _test_nic_name()
+        iface_info = {
+            Interface.NAME: pf_name,
+            Interface.STATE: InterfaceState.UP,
+            Ethernet.CONFIG_SUBTREE: {
+                Ethernet.SRIOV_SUBTREE: {Ethernet.SRIOV.TOTAL_VFS: 63},
+            },
+        }
+        desired_state = {Interface.KEY: [iface_info]}
+        libnmstate.apply(desired_state)
+
+    def test_change_vf_parameters_only(self, sriov_with_62_vfs):
+        pf_name = _test_nic_name()
+        cur_iface = show_only((pf_name,))[Interface.KEY][0]
+        iface_infos = [
+            {
+                Interface.NAME: pf_name,
+                Interface.TYPE: InterfaceType.ETHERNET,
+                Interface.STATE: InterfaceState.UP,
+                Ethtool.CONFIG_SUBTREE: cur_iface[Ethtool.CONFIG_SUBTREE],
+                Ethernet.CONFIG_SUBTREE: {
+                    Ethernet.SRIOV_SUBTREE: {
+                        Ethernet.SRIOV.VFS_SUBTREE: [VF0_CONF, VF1_CONF],
+                    }
+                },
+            },
+        ]
+        desired_state = {Interface.KEY: iface_infos}
+        libnmstate.apply(desired_state)
+        vf_ifaces = get_sriov_vf_names(pf_name)
+        assert len(vf_ifaces) == 62
+
+    def test_drivers_autoprobe_false(self, disable_sriov):
+        pf_name = _test_nic_name()
+        desired_state = {
+            Interface.KEY: [
+                {
+                    Interface.NAME: pf_name,
+                    Ethernet.CONFIG_SUBTREE: {
+                        Ethernet.SRIOV_SUBTREE: {
+                            Ethernet.SRIOV.DRIVERS_AUTOPROBE: False,
+                            Ethernet.SRIOV.TOTAL_VFS: 32,
+                        },
+                    },
+                }
+            ]
+        }
+        libnmstate.apply(desired_state)
+        vf_ifaces = get_sriov_vf_names(pf_name)
+        assert len(vf_ifaces) == 0
+
+    def test_drivers_autoprobe_restore_default(self, disable_sriov):
+        pf_name = _test_nic_name()
+        desired_state = {
+            Interface.KEY: [
+                {
+                    Interface.NAME: pf_name,
+                    Ethernet.CONFIG_SUBTREE: {
+                        Ethernet.SRIOV_SUBTREE: {Ethernet.SRIOV.TOTAL_VFS: 2},
+                    },
+                }
+            ]
+        }
+        libnmstate.apply(desired_state)
+        vf_ifaces = get_sriov_vf_names(pf_name)
+        assert len(vf_ifaces) == 2

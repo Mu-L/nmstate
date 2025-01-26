@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
@@ -10,6 +11,9 @@ use crate::{
     ip::{is_ipv6_addr, sanitize_ip_network},
     ErrorKind, InterfaceType, MergedInterfaces, NmstateError,
 };
+
+const DEFAULT_TABLE_ID: u32 = 254; // main route table ID
+const LOOPBACK_IFACE_NAME: &str = "lo";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -64,21 +68,38 @@ impl Routes {
     }
 
     pub fn validate(&self) -> Result<(), NmstateError> {
-        // All desire non-absent route should have next hop interface
+        // All desire non-absent route should have next hop interface except
+        // for route with route type `Blackhole`, `Unreachable`, `Prohibit`.
         if let Some(config_routes) = self.config.as_ref() {
             for route in config_routes.iter() {
-                if !route.is_absent() && route.next_hop_iface.is_none() {
-                    return Err(NmstateError::new(
-                        ErrorKind::NotImplementedError,
-                        format!(
-                            "Route with empty next hop interface \
+                if !route.is_absent() {
+                    if !route.is_unicast()
+                        && (route.next_hop_iface.is_some()
+                            && route.next_hop_iface
+                                != Some(LOOPBACK_IFACE_NAME.to_string())
+                            || route.next_hop_addr.is_some())
+                    {
+                        return Err(NmstateError::new(
+                            ErrorKind::InvalidArgument,
+                            format!(
+                                "A {:?} Route cannot have a next \
+                                hop : {route:?}",
+                                route.route_type.unwrap()
+                            ),
+                        ));
+                    } else if route.next_hop_iface.is_none()
+                        && route.is_unicast()
+                    {
+                        return Err(NmstateError::new(
+                            ErrorKind::NotImplementedError,
+                            format!(
+                                "Route with empty next hop interface \
                             is not supported: {route:?}"
-                        ),
-                    ));
+                            ),
+                        ));
+                    }
                 }
-                if let Some(dst) = route.destination.as_deref() {
-                    validate_route_dst(dst)?;
-                }
+                validate_route_dst(route)?;
             }
         }
         Ok(())
@@ -118,7 +139,8 @@ pub struct RouteEntry {
     )]
     /// Route next hop interface name.
     /// Serialize and deserialize to/from `next-hop-interface`.
-    /// Mandatory for every non-absent routes.
+    /// Mandatory for every non-absent routes except for route with
+    /// route type `Blackhole`, `Unreachable`, `Prohibit`.
     pub next_hop_iface: Option<String>,
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -154,6 +176,56 @@ pub struct RouteEntry {
         deserialize_with = "crate::deserializer::option_u16_or_string"
     )]
     pub weight: Option<u16>,
+    /// Route type
+    /// Serialize and deserialize to/from `route-type`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_type: Option<RouteType>,
+    /// Congestion window clamp
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwnd: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Route source defines which IP address should be used as the source
+    /// for packets routed via a specific route
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub enum RouteType {
+    Blackhole,
+    Unreachable,
+    Prohibit,
+}
+
+impl std::fmt::Display for RouteType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Blackhole => "blackhole",
+                Self::Unreachable => "unreachable",
+                Self::Prohibit => "prohibit",
+            }
+        )
+    }
+}
+
+const RTN_UNICAST: u8 = 1;
+const RTN_BLACKHOLE: u8 = 6;
+const RTN_UNREACHABLE: u8 = 7;
+const RTN_PROHIBIT: u8 = 8;
+
+impl From<RouteType> for u8 {
+    fn from(v: RouteType) -> u8 {
+        match v {
+            RouteType::Blackhole => RTN_BLACKHOLE,
+            RouteType::Unreachable => RTN_UNREACHABLE,
+            RouteType::Prohibit => RTN_PROHIBIT,
+        }
+    }
 }
 
 impl RouteEntry {
@@ -168,6 +240,8 @@ impl RouteEntry {
         matches!(self.state, Some(RouteState::Absent))
     }
 
+    /// Whether the desired route (self) matches with another
+    /// metric is ignored.
     pub(crate) fn is_match(&self, other: &Self) -> bool {
         if self.destination.as_ref().is_some()
             && self.destination.as_deref() != Some("")
@@ -195,12 +269,22 @@ impl RouteEntry {
         if self.weight.is_some() && self.weight != other.weight {
             return false;
         }
+        if self.route_type.is_some() && self.route_type != other.route_type {
+            return false;
+        }
+        if self.cwnd.is_some() && self.cwnd != other.cwnd {
+            return false;
+        }
+        if self.source.as_ref().is_some() && self.source != other.source {
+            return false;
+        }
         true
     }
 
     // Return tuple of (no_absent, is_ipv4, table_id, next_hop_iface,
-    // destination, next_hop_addr, weight)
-    fn sort_key(&self) -> (bool, bool, u32, &str, &str, &str, u16) {
+    // destination, next_hop_addr, source, weight, cwnd)
+    // Metric is ignored
+    fn sort_key(&self) -> (bool, bool, u32, &str, &str, &str, &str, u16, u32) {
         (
             !matches!(self.state, Some(RouteState::Absent)),
             !self
@@ -208,11 +292,15 @@ impl RouteEntry {
                 .as_ref()
                 .map(|d| is_ipv6_addr(d.as_str()))
                 .unwrap_or_default(),
-            self.table_id.unwrap_or(RouteEntry::USE_DEFAULT_ROUTE_TABLE),
-            self.next_hop_iface.as_deref().unwrap_or(""),
+            self.table_id.unwrap_or(DEFAULT_TABLE_ID),
+            self.next_hop_iface
+                .as_deref()
+                .unwrap_or(LOOPBACK_IFACE_NAME),
             self.destination.as_deref().unwrap_or(""),
             self.next_hop_addr.as_deref().unwrap_or(""),
+            self.source.as_deref().unwrap_or(""),
             self.weight.unwrap_or_default(),
+            self.cwnd.unwrap_or_default(),
         )
     }
 
@@ -243,6 +331,25 @@ impl RouteEntry {
                 self.next_hop_addr = Some(new_via);
             }
         }
+        if let Some(src) = self.source.as_ref() {
+            let new_src = format!(
+                "{}",
+                src.parse::<std::net::IpAddr>().map_err(|e| {
+                    NmstateError::new(
+                        ErrorKind::InvalidArgument,
+                        format!("Failed to parse IP address '{}': {}", src, e),
+                    )
+                })?
+            );
+            if src != &new_src {
+                log::info!(
+                    "Route source address {} sanitized to {}",
+                    src,
+                    new_src
+                );
+                self.source = Some(new_src);
+            }
+        }
         if let Some(weight) = self.weight {
             if !(1..=256).contains(&weight) {
                 return Err(NmstateError::new(
@@ -263,12 +370,25 @@ impl RouteEntry {
                 }
             }
         }
+        if let Some(cwnd) = self.cwnd {
+            if cwnd == 0 {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    "The value of 'cwnd' cannot be 0".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 
     pub(crate) fn is_ipv6(&self) -> bool {
         self.destination.as_ref().map(|d| is_ipv6_addr(d.as_str()))
             == Some(true)
+    }
+
+    pub(crate) fn is_unicast(&self) -> bool {
+        self.route_type.is_none()
+            || u8::from(self.route_type.unwrap()) == RTN_UNICAST
     }
 }
 
@@ -296,6 +416,12 @@ impl PartialOrd for RouteEntry {
     }
 }
 
+impl Hash for RouteEntry {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.sort_key().hash(state);
+    }
+}
+
 impl std::fmt::Display for RouteEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut props = Vec::new();
@@ -311,6 +437,9 @@ impl std::fmt::Display for RouteEntry {
         if let Some(v) = self.next_hop_addr.as_ref() {
             props.push(format!("next-hop-address: {v}"));
         }
+        if let Some(v) = self.source.as_ref() {
+            props.push(format!("source: {v}"));
+        }
         if let Some(v) = self.metric.as_ref() {
             props.push(format!("metric: {v}"));
         }
@@ -320,6 +449,9 @@ impl std::fmt::Display for RouteEntry {
         if let Some(v) = self.weight {
             props.push(format!("weight: {v}"));
         }
+        if let Some(v) = self.cwnd {
+            props.push(format!("cwnd: {v}"));
+        }
 
         write!(f, "{}", props.join(" "))
     }
@@ -327,8 +459,16 @@ impl std::fmt::Display for RouteEntry {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MergedRoutes {
-    pub(crate) indexed: HashMap<String, Vec<RouteEntry>>,
+    // When all routes next hop to a interface are all marked as absent,
+    // the `MergedRoutes.merged` will not have entry for this interface, but
+    // interface name is found in `MergedRoutes.route_changed_ifaces`.
+    // For backend use incremental route changes, please use
+    // `MergedRoutes.changed_routes`.
+    pub(crate) merged: HashMap<String, Vec<RouteEntry>>,
     pub(crate) route_changed_ifaces: Vec<String>,
+    // The `changed_routes` contains changed routes including those been marked
+    // as absent. Not including desired route equal to current route.
+    pub(crate) changed_routes: Vec<RouteEntry>,
     pub(crate) desired: Routes,
     pub(crate) current: Routes,
 }
@@ -350,6 +490,7 @@ impl MergedRoutes {
         }
 
         let mut changed_ifaces: HashSet<&str> = HashSet::new();
+        let mut changed_routes: HashSet<RouteEntry> = HashSet::new();
 
         let ifaces_marked_as_absent: Vec<&str> = merged_ifaces
             .kernel_ifaces
@@ -411,6 +552,8 @@ impl MergedRoutes {
                     ));
                 }
                 changed_ifaces.insert(via.as_str());
+            } else if rt.route_type.is_some() {
+                changed_ifaces.insert(LOOPBACK_IFACE_NAME);
             }
         }
 
@@ -423,35 +566,40 @@ impl MergedRoutes {
                     if absent_rt.is_match(rt) {
                         if let Some(via) = rt.next_hop_iface.as_ref() {
                             changed_ifaces.insert(via.as_str());
+                        } else {
+                            changed_ifaces.insert(LOOPBACK_IFACE_NAME);
                         }
                     }
                 }
             }
         }
 
-        let mut flattend_routes: Vec<RouteEntry> = Vec::new();
+        let mut merged_routes: Vec<RouteEntry> = Vec::new();
 
         if let Some(cur_rts) = current.config.as_ref() {
             for rt in cur_rts {
                 if let Some(via) = rt.next_hop_iface.as_ref() {
-                    if !ifaces_marked_as_absent.contains(&via.as_str())
-                        && ((rt.is_ipv6()
-                            && !ifaces_with_ipv6_disabled
+                    // We include current route to merged_routes when it is
+                    // not marked as absent due to absent interface or disabled
+                    // ip stack or route state:absent.
+                    if ifaces_marked_as_absent.contains(&via.as_str())
+                        || (rt.is_ipv6()
+                            && ifaces_with_ipv6_disabled
                                 .contains(&via.as_str()))
-                            || (!rt.is_ipv6()
-                                && !ifaces_with_ipv4_disabled
-                                    .contains(&via.as_str())))
-                    {
-                        if desired_routes
+                        || (!rt.is_ipv6()
+                            && ifaces_with_ipv4_disabled
+                                .contains(&via.as_str()))
+                        || desired_routes
                             .as_slice()
                             .iter()
                             .filter(|r| r.is_absent())
                             .any(|absent_rt| absent_rt.is_match(rt))
-                        {
-                            continue;
-                        }
-
-                        flattend_routes.push(rt.clone());
+                    {
+                        let mut new_rt = rt.clone();
+                        new_rt.state = Some(RouteState::Absent);
+                        changed_routes.insert(new_rt);
+                    } else {
+                        merged_routes.push(rt.clone());
                     }
                 }
             }
@@ -463,18 +611,31 @@ impl MergedRoutes {
             .iter()
             .filter(|rt| !rt.is_absent())
         {
-            flattend_routes.push(rt.clone());
+            if let Some(cur_rts) = current.config.as_ref() {
+                if !cur_rts.as_slice().iter().any(|cur_rt| cur_rt.is_match(rt))
+                {
+                    changed_routes.insert(rt.clone());
+                }
+            }
+            merged_routes.push(rt.clone());
         }
 
-        flattend_routes.sort_unstable();
-        flattend_routes.dedup();
+        merged_routes.sort_unstable();
+        merged_routes.dedup();
 
-        let mut indexed: HashMap<String, Vec<RouteEntry>> = HashMap::new();
+        let mut merged: HashMap<String, Vec<RouteEntry>> = HashMap::new();
 
-        for rt in flattend_routes {
+        for rt in merged_routes {
             if let Some(via) = rt.next_hop_iface.as_ref() {
                 let rts: &mut Vec<RouteEntry> =
-                    match indexed.entry(via.to_string()) {
+                    match merged.entry(via.to_string()) {
+                        Entry::Occupied(o) => o.into_mut(),
+                        Entry::Vacant(v) => v.insert(Vec::new()),
+                    };
+                rts.push(rt);
+            } else if rt.route_type.is_some() {
+                let rts: &mut Vec<RouteEntry> =
+                    match merged.entry(LOOPBACK_IFACE_NAME.to_string()) {
                         Entry::Occupied(o) => o.into_mut(),
                         Entry::Vacant(v) => v.insert(Vec::new()),
                     };
@@ -486,10 +647,11 @@ impl MergedRoutes {
             changed_ifaces.iter().map(|i| i.to_string()).collect();
 
         Ok(Self {
-            indexed,
+            merged,
             desired,
             current,
             route_changed_ifaces,
+            changed_routes: changed_routes.drain().collect(),
         })
     }
 
@@ -509,7 +671,7 @@ impl MergedRoutes {
             .collect();
 
         for iface in ignored_ifaces.as_slice() {
-            self.indexed.remove(&iface.to_string());
+            self.merged.remove(*iface);
         }
         self.route_changed_ifaces
             .retain(|n| !ignored_ifaces.contains(&n.as_str()));
@@ -522,48 +684,51 @@ impl MergedRoutes {
 
 // Validating if the route destination network is valid,
 // 0.0.0.0/8 and its subnet cannot be used as the route destination network
-fn validate_route_dst(dst: &str) -> Result<(), NmstateError> {
-    if !is_ipv6_addr(dst) {
-        let ip_net: Vec<&str> = dst.split('/').collect();
-        let ip_addr = Ipv4Addr::from_str(ip_net[0])?;
-        if ip_addr.octets()[0] == 0 {
-            if dst.contains('/') {
-                let prefix = match ip_net[1].parse::<i32>() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        return Err(NmstateError::new(
+// for unicast route
+fn validate_route_dst(route: &RouteEntry) -> Result<(), NmstateError> {
+    if let Some(dst) = route.destination.as_deref() {
+        if !is_ipv6_addr(dst) {
+            let ip_net: Vec<&str> = dst.split('/').collect();
+            let ip_addr = Ipv4Addr::from_str(ip_net[0])?;
+            if ip_addr.octets()[0] == 0 {
+                if dst.contains('/') {
+                    let prefix = match ip_net[1].parse::<i32>() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            return Err(NmstateError::new(
+                                ErrorKind::InvalidArgument,
+                                format!(
+                                    "The prefix of the route destination network \
+                                    '{dst}' is invalid"
+                                ),
+                            ));
+                        }
+                    };
+                    if prefix >= 8 && route.is_unicast() {
+                        let e = NmstateError::new(
                             ErrorKind::InvalidArgument,
-                            format!(
-                                "The prefix of the route destination network \
-                                '{dst}' is invalid"
-                            ),
-                        ));
+                            "0.0.0.0/8 and its subnet cannot be used as \
+                            the route destination for unicast route, please use \
+                            the default gateway 0.0.0.0/0 instead"
+                                .to_string(),
+                        );
+                        log::error!("{}", e);
+                        return Err(e);
                     }
-                };
-                if prefix >= 8 {
+                } else if route.is_unicast() {
                     let e = NmstateError::new(
                         ErrorKind::InvalidArgument,
                         "0.0.0.0/8 and its subnet cannot be used as \
-                        the route destination, please use the default \
-                        gateway 0.0.0.0/0 instead"
+                        the route destination for unicast route, please use \
+                        the default gateway 0.0.0.0/0 instead"
                             .to_string(),
                     );
                     log::error!("{}", e);
                     return Err(e);
                 }
-            } else {
-                let e = NmstateError::new(
-                    ErrorKind::InvalidArgument,
-                    "0.0.0.0/8 and its subnet cannot be used as \
-                    the route destination, please use the default \
-                    gateway 0.0.0.0/0 instead"
-                        .to_string(),
-                );
-                log::error!("{}", e);
-                return Err(e);
             }
+            return Ok(());
         }
-        return Ok(());
     }
     Ok(())
 }

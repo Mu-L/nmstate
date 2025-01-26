@@ -4,9 +4,9 @@
 
 A declarative network management API for hosts.
 
-![CI](https://github.com/nmstate/nmstate/workflows/CI/badge.svg?branch=base)
-[![crates.io](https://img.shields.io/crates/v/nmstate.svg)
-[![docs.rs](https://img.shields.io/docsrs/nmstate)
+[![CI](https://github.com/nmstate/nmstate/workflows/CI/badge.svg?branch=base)](https://github.com/nmstate/nmstate/actions?query=workflow%3ACI+branch%3Abase)
+[![crates.io](https://img.shields.io/crates/v/nmstate.svg)](https://crates.io/crates/nmstate)
+[![docs.rs](https://img.shields.io/docsrs/nmstate)](https://docs.rs/nmstate)
 [![Fedora Rawhide version](https://img.shields.io/badge/dynamic/json.svg?label=Fedora%20Rawhide&url=https%3A%2F%2Fapps.fedoraproject.org%2Fmdapi%2Frawhide%2Fpkg%2Fnmstate&query=%24.version&colorB=blue)](https://src.fedoraproject.org/rpms/nmstate)
 
 Copr build status, all repos are built for Fedora Linux and RHEL/CentOS Stream/EPEL 8+:
@@ -32,6 +32,10 @@ Nmstate provides:
  * C binding
 
 More document could be found at [nmstate.io](https://nmstate.io)
+
+The codes of nmstate are licensed under [Apache 2.0][apache_2_0_license_url]
+except the test codes in `tests` folder are licensed under
+[LGPL 2.1+][lgpl_2_1_license_url]
 
 ## State example:
 
@@ -68,7 +72,7 @@ interfaces:
 
 *Nmstate* [GitHub Issues pages][github_issue_url] for discussion.
 
-You may find us in `#nmstate` on [Libera IRC](https://libera.chat/) also.
+Matrix room: [`#nmstate:fedora.im`][matrix_room_url]
 
 ## Contributing
 
@@ -83,6 +87,7 @@ For other distribution, please see the [install guide](https://nmstate.io/user/i
 
 ## Documentation
 
+* [Rust crate](https://docs.rs/nmstate/latest/nmstate/index.html)
 * [libnmstate API](https://nmstate.github.io/devel/api.html)
 * [Code examples](https://nmstate.github.io/devel/py_example.html)
 * [State examples](https://nmstate.github.io/examples.html)
@@ -95,3 +100,6 @@ Please refer to [CHANGELOG](CHANGELOG)
 
 [mailing_list]: https://lists.fedorahosted.org/admin/lists/nmstate-devel.lists.fedorahosted.org
 [github_issue_url]: https://github.com/nmstate/nmstate/issues
+[apache_2_0_license_url]: https://www.apache.org/licenses/LICENSE-2.0
+[lgpl_2_1_license_url]: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+[matrix_room_url]: https://matrix.to/#/#nmstate:fedora.im

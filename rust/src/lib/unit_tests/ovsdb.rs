@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{MergedOvsDbGlobalConfig, OvsDbGlobalConfig};
+use crate::{MergedOvsDbGlobalConfig, NetworkState, OvsDbGlobalConfig};
 
 fn get_current_ovsdb_config() -> OvsDbGlobalConfig {
     serde_yaml::from_str(
-        r#"---
+        r"---
 external_ids:
   a: A0
   b: B0
@@ -15,7 +15,7 @@ other_config:
   e: E0
   f: F0
   g: G0
-"#,
+",
     )
     .unwrap()
 }
@@ -23,7 +23,7 @@ other_config:
 #[test]
 fn test_ovsdb_merge_with_override_and_delete() {
     let desired: OvsDbGlobalConfig = serde_yaml::from_str(
-        r#"---
+        r"---
 external_ids:
   a: A
   b: B
@@ -32,16 +32,21 @@ other_config:
   d: null
   e: E
   f: F
-"#,
+",
     )
     .unwrap();
 
     let current = get_current_ovsdb_config();
 
-    let merged_ovsdb = MergedOvsDbGlobalConfig::new(desired, current);
+    let merged_ovsdb = MergedOvsDbGlobalConfig::new(
+        Some(desired),
+        current,
+        &Default::default(),
+    )
+    .unwrap();
 
     let expect: OvsDbGlobalConfig = serde_yaml::from_str(
-        r#"---
+        r"---
 external_ids:
   a: A
   b: B
@@ -50,7 +55,7 @@ other_config:
   e: E
   f: F
   g: G0
-"#,
+",
     )
     .unwrap();
 
@@ -70,14 +75,19 @@ fn test_ovsdb_merge_delete_all() {
     let current = get_current_ovsdb_config();
 
     let expect: OvsDbGlobalConfig = serde_yaml::from_str(
-        r#"---
+        r"---
 external_ids: {}
 other_config: {}
-"#,
+",
     )
     .unwrap();
 
-    let merged_ovsdb = MergedOvsDbGlobalConfig::new(desired, current);
+    let merged_ovsdb = MergedOvsDbGlobalConfig::new(
+        Some(desired),
+        current,
+        &Default::default(),
+    )
+    .unwrap();
 
     assert_eq!(
         &merged_ovsdb.external_ids,
@@ -92,26 +102,31 @@ other_config: {}
 #[test]
 fn test_ovsdb_merge_delete_all_external_ids() {
     let desired: OvsDbGlobalConfig = serde_yaml::from_str(
-        r#"---
+        r"---
 external_ids: {}
-"#,
+",
     )
     .unwrap();
     let current = get_current_ovsdb_config();
 
     let expect: OvsDbGlobalConfig = serde_yaml::from_str(
-        r#"---
+        r"---
 external_ids: {}
 other_config:
   d: D0
   e: E0
   f: F0
   g: G0
-"#,
+",
     )
     .unwrap();
 
-    let merged_ovsdb = MergedOvsDbGlobalConfig::new(desired, current);
+    let merged_ovsdb = MergedOvsDbGlobalConfig::new(
+        Some(desired),
+        current,
+        &Default::default(),
+    )
+    .unwrap();
 
     assert_eq!(
         &merged_ovsdb.external_ids,
@@ -126,26 +141,31 @@ other_config:
 #[test]
 fn test_ovsdb_merge_delete_all_other_config() {
     let desired: OvsDbGlobalConfig = serde_yaml::from_str(
-        r#"---
+        r"---
 other_config: {}
-"#,
+",
     )
     .unwrap();
     let current = get_current_ovsdb_config();
 
     let expect: OvsDbGlobalConfig = serde_yaml::from_str(
-        r#"---
+        r"---
 external_ids:
   a: A0
   b: B0
   c: C0
   h: H0
 other_config: {}
-"#,
+",
     )
     .unwrap();
 
-    let merged_ovsdb = MergedOvsDbGlobalConfig::new(desired, current);
+    let merged_ovsdb = MergedOvsDbGlobalConfig::new(
+        Some(desired),
+        current,
+        &Default::default(),
+    )
+    .unwrap();
 
     assert_eq!(
         &merged_ovsdb.external_ids,
@@ -163,7 +183,38 @@ fn test_ovsdb_verify_null_current() {
     let pre_apply_current = desired.clone();
     let current = desired.clone();
 
-    let merged_ovsdb = MergedOvsDbGlobalConfig::new(desired, pre_apply_current);
+    let merged_ovsdb = MergedOvsDbGlobalConfig::new(
+        Some(desired),
+        pre_apply_current,
+        &Default::default(),
+    )
+    .unwrap();
 
-    merged_ovsdb.verify(&current).unwrap();
+    merged_ovsdb.verify(current).unwrap();
+}
+
+#[test]
+fn test_ovsdb_purge_by_empty_section() {
+    let desired: NetworkState = serde_yaml::from_str(
+        r"---
+        ovs-db: {}
+        ",
+    )
+    .unwrap();
+
+    assert!(desired.ovsdb.unwrap().is_purge());
+}
+
+#[test]
+fn test_ovsdb_purge_by_empty_hash() {
+    let desired: NetworkState = serde_yaml::from_str(
+        r"---
+        ovs-db:
+          external_ids: {}
+          other_config: {}
+        ",
+    )
+    .unwrap();
+
+    assert!(desired.ovsdb.unwrap().is_purge());
 }

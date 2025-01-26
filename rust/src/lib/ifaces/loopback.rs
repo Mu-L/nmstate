@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::{Ipv4Addr, Ipv6Addr};
+
 use serde::{Deserialize, Serialize};
 
-use crate::{BaseInterface, ErrorKind, InterfaceType, NmstateError};
+use crate::{
+    BaseInterface, ErrorKind, InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6,
+    InterfaceState, InterfaceType, NmstateError,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -15,6 +20,7 @@ use crate::{BaseInterface, ErrorKind, InterfaceType, NmstateError};
 ///  * Even not desired, the `127.0.0.1/8` and `::1` are always appended to
 ///    static IP address list.
 ///  * Require NetworkManager 1.41+ unless in kernel only mode.
+///
 /// Example yaml outpuf of `[crate::NetworkState]` with loopback interface:
 /// ```yml
 /// interfaces:
@@ -43,6 +49,29 @@ impl Default for LoopbackInterface {
     fn default() -> Self {
         let mut base = BaseInterface::new();
         base.iface_type = InterfaceType::Loopback;
+        base.name = "lo".to_string();
+        base.state = InterfaceState::Up;
+        base.ipv4 = Some(InterfaceIpv4 {
+            enabled: true,
+            enabled_defined: true,
+            addresses: Some(vec![InterfaceIpAddr {
+                ip: Ipv4Addr::LOCALHOST.into(),
+                prefix_length: 8,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        base.ipv6 = Some(InterfaceIpv6 {
+            enabled: true,
+            enabled_defined: true,
+            addresses: Some(vec![InterfaceIpAddr {
+                ip: Ipv6Addr::LOCALHOST.into(),
+                prefix_length: 128,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
         Self { base }
     }
 }
@@ -52,33 +81,40 @@ impl LoopbackInterface {
         Self::default()
     }
 
-    pub(crate) fn sanitize(&self) -> Result<(), NmstateError> {
-        if self.base.ipv4.as_ref().map(|i| i.enabled) == Some(false) {
-            return Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                "Loopback interface cannot be have IPv4 disabled".to_string(),
-            ));
-        }
-        if self.base.ipv6.as_ref().map(|i| i.enabled) == Some(false) {
-            return Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                "Loopback interface cannot be have IPv6 disabled".to_string(),
-            ));
-        }
-        if self.base.ipv4.as_ref().map(|i| i.is_auto()) == Some(true) {
-            return Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                "Loopback interface cannot be have IPv4 DHCP enabled"
-                    .to_string(),
-            ));
-        }
-        if self.base.ipv6.as_ref().map(|i| i.is_auto()) == Some(true) {
-            return Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                "Loopback interface cannot be have IPv6 \
+    pub(crate) fn sanitize(
+        &self,
+        is_desired: bool,
+    ) -> Result<(), NmstateError> {
+        if is_desired {
+            if self.base.ipv4.as_ref().map(|i| i.enabled) == Some(false) {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    "Loopback interface cannot be have IPv4 disabled"
+                        .to_string(),
+                ));
+            }
+            if self.base.ipv6.as_ref().map(|i| i.enabled) == Some(false) {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    "Loopback interface cannot be have IPv6 disabled"
+                        .to_string(),
+                ));
+            }
+            if self.base.ipv4.as_ref().map(|i| i.is_auto()) == Some(true) {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    "Loopback interface cannot be have IPv4 DHCP enabled"
+                        .to_string(),
+                ));
+            }
+            if self.base.ipv6.as_ref().map(|i| i.is_auto()) == Some(true) {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    "Loopback interface cannot be have IPv6 \
                 autoconf/DHCPv6 enabled"
-                    .to_string(),
-            ));
+                        .to_string(),
+                ));
+            }
         }
         Ok(())
     }

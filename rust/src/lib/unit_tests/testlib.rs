@@ -12,25 +12,25 @@ use crate::{
 pub(crate) fn new_eth_iface(name: &str) -> Interface {
     let mut iface = EthernetInterface::new();
     iface.base.name = name.to_string();
-    Interface::Ethernet(iface)
+    Interface::Ethernet(Box::new(iface))
 }
 
 pub(crate) fn new_unknown_iface(name: &str) -> Interface {
     let mut iface = UnknownInterface::new();
     iface.base.name = name.to_string();
-    Interface::Unknown(iface)
+    Interface::Unknown(Box::new(iface))
 }
 
 pub(crate) fn new_br_iface(name: &str) -> Interface {
     let mut iface = LinuxBridgeInterface::new();
     iface.base.name = name.to_string();
-    Interface::LinuxBridge(iface)
+    Interface::LinuxBridge(Box::new(iface))
 }
 
 fn new_bond_iface(name: &str) -> Interface {
     let mut iface = BondInterface::new();
     iface.base.name = name.to_string();
-    Interface::Bond(iface)
+    Interface::Bond(Box::new(iface))
 }
 
 pub(crate) fn new_ovs_br_iface(name: &str, port_names: &[&str]) -> Interface {
@@ -46,7 +46,7 @@ pub(crate) fn new_ovs_br_iface(name: &str, port_names: &[&str]) -> Interface {
     }
     br_conf.ports = Some(br_port_confs);
     br0.bridge = Some(br_conf);
-    Interface::OvsBridge(br0)
+    Interface::OvsBridge(Box::new(br0))
 }
 
 pub(crate) fn new_ovs_iface(name: &str, ctrl_name: &str) -> Interface {
@@ -55,7 +55,7 @@ pub(crate) fn new_ovs_iface(name: &str, ctrl_name: &str) -> Interface {
     iface.base.name = name.to_string();
     iface.base.controller = Some(ctrl_name.to_string());
     iface.base.controller_type = Some(InterfaceType::OvsBridge);
-    Interface::OvsInterface(iface)
+    Interface::OvsInterface(Box::new(iface))
 }
 
 pub(crate) fn new_vlan_iface(name: &str, parent: &str, id: u16) -> Interface {
@@ -63,10 +63,11 @@ pub(crate) fn new_vlan_iface(name: &str, parent: &str, id: u16) -> Interface {
     iface.base.name = name.to_string();
     iface.base.iface_type = InterfaceType::Vlan;
     iface.vlan = Some(VlanConfig {
-        base_iface: parent.to_string(),
+        base_iface: Some(parent.to_string()),
         id,
+        ..Default::default()
     });
-    Interface::Vlan(iface)
+    Interface::Vlan(Box::new(iface))
 }
 
 pub(crate) fn new_nested_4_ifaces() -> [Interface; 6] {
@@ -222,7 +223,7 @@ fn gen_rule_entry(
 
 pub(crate) fn new_test_nic_with_static_ip() -> Interface {
     serde_yaml::from_str(
-        r#"
+        r"
         name: eth1
         type: ethernet
         state: up
@@ -244,14 +245,14 @@ pub(crate) fn new_test_nic_with_static_ip() -> Interface {
           autoconf: false
           dhcp: false
           enabled: true
-        "#,
+        ",
     )
     .unwrap()
 }
 
 fn new_test_nic2_with_static_ip() -> Interface {
     serde_yaml::from_str(
-        r#"
+        r"
         name: eth2
         type: ethernet
         state: up
@@ -273,17 +274,22 @@ fn new_test_nic2_with_static_ip() -> Interface {
           autoconf: false
           dhcp: false
           enabled: true
-        "#,
+        ",
     )
     .unwrap()
 }
 
-pub(crate) fn gen_merged_ifaces_for_route_test() -> MergedInterfaces {
+pub(crate) fn gen_merged_ifaces_for_route_test(
+) -> (MergedInterfaces, Interfaces) {
     let mut ifaces = Interfaces::new();
     ifaces.push(new_test_nic_with_static_ip());
     ifaces.push(new_test_nic2_with_static_ip());
     let mut current = Interfaces::new();
     current.push(new_eth_iface("eth1"));
     current.push(new_eth_iface("eth2"));
-    MergedInterfaces::new(ifaces, current, false, false).unwrap()
+
+    let merged =
+        MergedInterfaces::new(ifaces, current.clone(), false, false).unwrap();
+
+    (merged, current)
 }

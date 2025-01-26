@@ -24,20 +24,23 @@ serving the tests of Nmstate.
 
 - `./examples/` - Contains YAML examples for different configurations.
 
-- `./libnmstate/ifaces/` Contains the classes including the attributes of the 
-interfaces.
+- `./logo` Logos used for publication.
+
+- `./k8s` k8s folder holds the scripts for kubernetes-nmstate CI.
+
+- `./rust/src/clib` C bindings of nmstate.
+
+- `./rust/src/go/nmstate` Go library of nmstate wrapping the C bindings.
  
-- `./libnmstate/nispor/` Contains the nmstate nispor plugin, currently for 
-querying kernel network status. 
+- `rust/src/python` Python library of nmstate wrapping the C bindings.
+ 
+- `./rust/src/lib/nispor/` Contains the code related to querying the network state with via Nispor. 
 
-- `./libnmstate/nm/` Contains the nmstate NetworkManager plugin, currently for 
-querying network status and applying network states. 
+- `./rust/src/lib/nm/` Contains the code related to applying the settings via NetworkManager backend.
 
-- `./libnmstate/plugins/` Contains the plugins supported by default (e.g. ovsdb). 
+- `./rust/src/lib/ovsdb/` Contains the code related to ovsdb communication and structures. 
 
-- `./libnmstate/schemas/` Contains the API schema file.
-
-- `./nmstatectl/` - Contains command lines tools.
+- `./rust/src/cli/` - Contains command lines tools.
 
 - `./packaging/` - Contains packaging utilities.
 
@@ -47,7 +50,7 @@ querying network status and applying network states.
 
 Before starting to contribute, make sure you have the basic git configuration: 
 Your name and email. This will be useful when signing your contributions. The 
-following commands will set your global name and email, althought you can 
+following commands will set your global name and email, although you can 
 change it later for every repo:
 
 ```
@@ -179,3 +182,38 @@ Do your best to follow the clean code guidelines.
 - Don’t return an error code, throw an exception instead.
 
 Ref: Book: Clean Code by Robert C. Martin (Uncle Bob)
+
+## Installing and Compiling
+This guide will walk you through the process of installing and compiling nmstate from the source. For installing stable release or other installation methods, please refer to nmstate installation guide: https://nmstate.io/user/install.md
+
+### Prerequisite 
+A Linux operating system is required. For Windows or macOS users, you can set up a Linux environment using VirtualBox, VMware, or Virt-manager.
+
+### Install Cargo Tool
+Cargo is Rust's build system and package manager, necessary for working with Rust programs, such as Nmstate.
+```
+- sudo apt update && sudo apt install cargo git # Debian/Ubuntu
+- sudo dnf install cargo git # Fedora
+- sudo yum install cargo git # RHEL
+```
+
+### Get the Source Code
+Clone the Nmstate repository: 
+```
+- git clone https://github.com/nmstate/nmstate.git
+- cd nmstate
+```
+
+### Compilation
+Run the following command at the top level of the code to compile the project:
+```
+- make
+```
+
+### Running the Compiled Program
+After successful compilation, you can run the nmstatectl tool to display the current network state:
+```
+- target/debug/nmstatectl show # To dump the state in json format, use the ‘--json’ flag.
+``` 
+
+For the complete developer’s guide, head over to our full documentation: https://nmstate.io/devel/dev_guide.html 

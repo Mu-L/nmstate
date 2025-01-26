@@ -301,7 +301,7 @@ fn test_auto_absent_ovs_interface() {
     absent_br0.base.name = "br0".to_string();
     absent_br0.base.state = InterfaceState::Absent;
     let mut ifaces = Interfaces::new();
-    ifaces.push(Interface::OvsBridge(absent_br0));
+    ifaces.push(Interface::OvsBridge(Box::new(absent_br0)));
 
     let merged_ifaces =
         MergedInterfaces::new(ifaces, cur_ifaces, false, false).unwrap();
@@ -453,6 +453,31 @@ fn test_overbook_swap_port_of_bond() {
 }
 
 #[test]
+fn test_iface_controller_not_conflict_with_bond_ports() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+- name: bond0
+  type: bond
+  state: up
+  link-aggregation:
+    mode: balance-rr
+  controller: br0
+- name: br0
+  type: ovs-bridge
+  state: up
+  bridge:
+    port:
+      - name: bond0
+",
+    )
+    .unwrap();
+
+    let result =
+        MergedInterfaces::new(des_ifaces, Interfaces::new(), false, false);
+    assert!(result.is_ok());
+}
+
+#[test]
 fn test_iface_controller_conflict_with_bond_ports() {
     let mut ifaces = Interfaces::new();
     ifaces.push(new_eth_iface("eth0"));
@@ -587,9 +612,38 @@ fn test_iface_detach_controller_been_list_in_other_port_list() {
 }
 
 #[test]
+fn test_iface_controller_conflict_with_empty_br_ports() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+- name: br0
+  type: linux-bridge
+  bridge:
+    ports: []
+- name: bond99
+  type: bond
+  state: up
+  controller: br0
+  link-aggregation:
+    mode: balance-rr
+    port:
+    - eth2
+    - eth1
+",
+    )
+    .unwrap();
+
+    let result =
+        MergedInterfaces::new(des_ifaces, Interfaces::new(), false, false);
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+    }
+}
+
+#[test]
 fn test_auto_manage_ports() {
     let des_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: br0
   type: linux-bridge
   state: up
@@ -597,18 +651,18 @@ fn test_auto_manage_ports() {
     port:
     - name: eth1
     - name: eth2
-"#,
+",
     )
     .unwrap();
     let cur_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: eth1
   type: ethernet
   state: ignore
 - name: eth2
   type: ethernet
   state: ignore
-"#,
+",
     )
     .unwrap();
 
@@ -643,9 +697,67 @@ fn test_auto_manage_ports() {
 }
 
 #[test]
+fn test_auto_manage_ovs_bond_ports() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+        - name: br0
+          type: ovs-bridge
+          state: up
+          bridge:
+            port:
+            - name: bond1
+              link-aggregation:
+                mode: balance-slb
+                port:
+                  - name: eth1
+                  - name: eth2",
+    )
+    .unwrap();
+    let cur_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+        - name: eth1
+          type: ethernet
+          state: ignore
+        - name: eth2
+          type: ethernet
+          state: ignore",
+    )
+    .unwrap();
+
+    let merged_ifaces =
+        MergedInterfaces::new(des_ifaces, cur_ifaces, false, false).unwrap();
+
+    let br_iface = merged_ifaces
+        .get_iface("br0", InterfaceType::OvsBridge)
+        .unwrap()
+        .for_apply
+        .as_ref()
+        .unwrap();
+
+    let eth1_iface = merged_ifaces
+        .get_iface("eth1", InterfaceType::Ethernet)
+        .unwrap()
+        .for_apply
+        .as_ref()
+        .unwrap();
+
+    let eth2_iface = merged_ifaces
+        .get_iface("eth1", InterfaceType::Ethernet)
+        .unwrap()
+        .for_apply
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(br_iface.ports(), Some(vec!["eth1", "eth2"]));
+    assert!(eth1_iface.is_up());
+    assert_eq!(eth1_iface.base_iface().controller.as_deref(), Some("br0"));
+    assert_eq!(eth2_iface.base_iface().controller.as_deref(), Some("br0"));
+}
+
+#[test]
 fn test_do_not_auto_manage_ports_if_current_has_ignore() {
     let des_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: br0
   type: linux-bridge
   state: up
@@ -653,11 +765,11 @@ fn test_do_not_auto_manage_ports_if_current_has_ignore() {
     port:
     - name: eth1
     - name: eth2
-"#,
+",
     )
     .unwrap();
     let cur_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: eth1
   type: ethernet
   state: ignore
@@ -673,7 +785,7 @@ fn test_do_not_auto_manage_ports_if_current_has_ignore() {
   bridge:
     port:
     - name: eth3
-"#,
+",
     )
     .unwrap();
 
@@ -700,9 +812,9 @@ fn test_do_not_auto_manage_ports_if_current_has_ignore() {
 #[test]
 fn test_absent_iface_holding_controller_and_ip() {
     let des_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
         - name: eth1
-          state: absent"#,
+          state: absent",
     )
     .unwrap();
 
@@ -710,7 +822,7 @@ fn test_absent_iface_holding_controller_and_ip() {
     // When user is removing this interface, we should not care about whether it
     // can hold IP or not.
     let mut cur_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
         - name: br0
           type: linux-bridge
           state: up
@@ -723,7 +835,7 @@ fn test_absent_iface_holding_controller_and_ip() {
           ipv6:
             enabled: true
             autoconf: true
-            dhcp: true"#,
+            dhcp: true",
     )
     .unwrap();
     if let Some(iface) = cur_ifaces.kernel_ifaces.get_mut("eth1") {
@@ -738,4 +850,124 @@ fn test_absent_iface_holding_controller_and_ip() {
     let iface = merged_ifaces.kernel_ifaces.get("eth1").unwrap();
 
     assert!(iface.for_apply.as_ref().unwrap().is_absent());
+}
+
+#[test]
+fn test_gen_topoligies_bridge_over_vlan() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+- name: br0
+  type: linux-bridge
+  state: up
+  bridge:
+    port:
+    - name: eth1.100
+    - name: eth2.100
+  ipv4:
+    address:
+    - ip: 192.0.2.252
+      prefix-length: 24
+    - ip: 192.0.2.251
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    autoconf: true
+    dhcp: true
+    enabled: true
+- name: eth1.100
+  type: vlan
+  vlan:
+    id: 100
+    base-iface: eth1
+- name: eth2.100
+  type: vlan
+  vlan:
+    id: 100
+    base-iface: eth2
+",
+    )
+    .unwrap();
+    let cur_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+- name: eth1
+  type: ethernet
+- name: eth2
+  type: ethernet
+",
+    )
+    .unwrap();
+
+    let merged_ifaces =
+        MergedInterfaces::new(des_ifaces, cur_ifaces, false, false).unwrap();
+
+    let top = merged_ifaces.gen_topoligies();
+
+    assert_eq!(
+        top,
+        vec![[
+            "static_ip4,auto_ip6".to_string(),
+            InterfaceType::LinuxBridge.to_string(),
+            InterfaceType::Vlan.to_string(),
+            InterfaceType::Ethernet.to_string()
+        ]
+        .join(" -> ")]
+    );
+}
+
+#[test]
+fn test_gen_topoligies_ovs_bridge() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+- name: br0
+  type: ovs-interface
+  state: up
+  ipv4:
+    address:
+    - ip: 192.0.2.252
+      prefix-length: 24
+    - ip: 192.0.2.251
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    autoconf: true
+    dhcp: true
+    enabled: true
+- name: br0
+  type: ovs-bridge
+  state: up
+  bridge:
+    ports:
+    - name: br0
+    - name: eth1
+    - name: eth2
+",
+    )
+    .unwrap();
+    let cur_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+- name: eth1
+  type: ethernet
+- name: eth2
+  type: ethernet
+",
+    )
+    .unwrap();
+
+    let merged_ifaces =
+        MergedInterfaces::new(des_ifaces, cur_ifaces, false, false).unwrap();
+
+    let top = merged_ifaces.gen_topoligies();
+
+    assert_eq!(
+        top,
+        vec![[
+            "static_ip4,auto_ip6".to_string(),
+            InterfaceType::OvsInterface.to_string(),
+            InterfaceType::OvsBridge.to_string(),
+            InterfaceType::Ethernet.to_string()
+        ]
+        .join(" -> ")]
+    );
 }

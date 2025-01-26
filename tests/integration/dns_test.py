@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 import libnmstate
+from libnmstate.error import NmstateValueError
 from libnmstate.schema import DNS
 from libnmstate.schema import Interface
 from libnmstate.schema import InterfaceIPv4
@@ -18,6 +19,9 @@ from .testlib import assertlib
 from .testlib import cmdlib
 from .testlib.bondlib import bond_interface
 from .testlib.genconf import gen_conf_apply
+from .testlib.servicelib import disable_service
+from .testlib.yaml import load_yaml
+
 
 IPV4_DNS_NAMESERVERS = ["8.8.8.8", "1.1.1.1"]
 EXTRA_IPV4_DNS_NAMESERVER = "9.9.9.9"
@@ -146,9 +150,9 @@ def test_dns_edit_3_more_nameservers(dns_servers):
 @pytest.mark.tier1
 @pytest.mark.parametrize(
     "empty_dns_config",
-    [{DNS.SERVER: [], DNS.SEARCH: []}, {}],
+    [{DNS.SERVER: [], DNS.SEARCH: [], DNS.OPTIONS: []}, {}],
     ids=[
-        "empty_server_and_search",
+        "empty_server_search_and_opt",
         "empty_dict",
     ],
 )
@@ -497,3 +501,171 @@ def test_uncompare_dns_servers(static_dns):
     current_state = libnmstate.show()
     assert "2001:db8::1" in current_state[DNS.KEY][DNS.CONFIG][DNS.SERVER]
     assert "::ffff:192.0.2.1" in current_state[DNS.KEY][DNS.CONFIG][DNS.SERVER]
+
+
+def test_set_and_remove_dns_options(static_dns):
+    old_state = static_dns
+    desired_state = yaml.load(
+        """---
+        dns-resolver:
+          config:
+            options:
+            - rotate
+            - debug
+        """,
+        Loader=yaml.SafeLoader,
+    )
+    libnmstate.apply(desired_state)
+    current_state = libnmstate.show()
+    assert "rotate" in current_state[DNS.KEY][DNS.CONFIG][DNS.OPTIONS]
+    assert "debug" in current_state[DNS.KEY][DNS.CONFIG][DNS.OPTIONS]
+    assert (
+        old_state[DNS.KEY][DNS.CONFIG][DNS.SERVER]
+        == current_state[DNS.KEY][DNS.CONFIG][DNS.SERVER]
+    )
+    assert (
+        old_state[DNS.KEY][DNS.CONFIG][DNS.SEARCH]
+        == current_state[DNS.KEY][DNS.CONFIG][DNS.SEARCH]
+    )
+
+
+def test_set_invalid_dns_options(static_dns):
+    desired_state = yaml.load(
+        """---
+        dns-resolver:
+          config:
+            options:
+            - rotate
+            - debug
+            - haha
+        """,
+        Loader=yaml.SafeLoader,
+    )
+    with pytest.raises(NmstateValueError):
+        libnmstate.apply(desired_state)
+
+
+def test_set_dns_option_with_value(static_dns):
+    desired_state = yaml.load(
+        """---
+        dns-resolver:
+          config:
+            options:
+            - rotate
+            - debug
+            - ndots:9
+        """,
+        Loader=yaml.SafeLoader,
+    )
+    libnmstate.apply(desired_state)
+    current_state = libnmstate.show()
+    assert "ndots:9" in current_state[DNS.KEY][DNS.CONFIG][DNS.OPTIONS]
+
+
+def test_invalid_dns_option_with_value(static_dns):
+    desired_state = yaml.load(
+        """---
+        dns-resolver:
+          config:
+            options:
+            - rotate
+            - debug
+            - ndot:9
+        """,
+        Loader=yaml.SafeLoader,
+    )
+    with pytest.raises(NmstateValueError):
+        libnmstate.apply(desired_state)
+
+
+@pytest.fixture
+def static_dns_with_options(static_dns):
+    desired_state = {
+        DNS.KEY: {
+            DNS.CONFIG: {
+                DNS.OPTIONS: ["debug", "rotate"],
+            }
+        },
+    }
+    libnmstate.apply(desired_state)
+
+
+def test_remove_all_dns_options(static_dns_with_options):
+    pre_apply_state = libnmstate.show()
+
+    desired_state = {
+        DNS.KEY: {
+            DNS.CONFIG: {
+                DNS.OPTIONS: [],
+            }
+        },
+    }
+    libnmstate.apply(desired_state)
+
+    current_state = libnmstate.show()
+    assert DNS.OPTIONS not in current_state[DNS.KEY][DNS.CONFIG]
+    assert (
+        current_state[DNS.KEY][DNS.CONFIG][DNS.SERVER]
+        == pre_apply_state[DNS.KEY][DNS.CONFIG][DNS.SERVER]
+    )
+    assert (
+        current_state[DNS.KEY][DNS.CONFIG][DNS.SEARCH]
+        == pre_apply_state[DNS.KEY][DNS.CONFIG][DNS.SEARCH]
+    )
+
+
+def test_purge_dns_full_config(static_dns_with_options):
+    desired_state = {DNS.KEY: {DNS.CONFIG: {}}}
+    libnmstate.apply(desired_state)
+
+    current_state = libnmstate.show()
+    assert not current_state[DNS.KEY][DNS.CONFIG]
+
+
+def test_purge_dns_with_empty_server_and_search(static_dns):
+    desired_state = {DNS.KEY: {DNS.CONFIG: {DNS.SERVER: [], DNS.SEARCH: []}}}
+    libnmstate.apply(desired_state)
+
+    current_state = libnmstate.show()
+    assert not current_state[DNS.KEY][DNS.CONFIG]
+
+
+def test_kernel_mode_dns_and_purge():
+    desired_state = load_yaml(
+        """---
+        dns-resolver:
+          config:
+            search:
+            - example.com
+            - example.org
+            server:
+            - 2001:4860:4860::8888
+            - 2001:4860:4860::8844
+            - 8.8.4.4
+            - 8.8.8.8
+            options:
+            - debug
+            - rotate
+        """
+    )
+    with disable_service("NetworkManager"):
+        libnmstate.apply(desired_state, kernel_only=True)
+        cur_state = libnmstate.show(kernel_only=True)
+        assert (
+            cur_state[DNS.KEY][DNS.CONFIG]
+            == desired_state[DNS.KEY][DNS.CONFIG]
+        )
+        assert (
+            cur_state[DNS.KEY][DNS.RUNNING]
+            == desired_state[DNS.KEY][DNS.CONFIG]
+        )
+
+        desired_state = load_yaml(
+            """---
+            dns-resolver:
+              config: {}
+            """
+        )
+        libnmstate.apply(desired_state, kernel_only=True)
+        cur_state = libnmstate.show(kernel_only=True)
+        assert not cur_state[DNS.KEY][DNS.CONFIG]

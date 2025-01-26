@@ -21,6 +21,10 @@ class Interface:
     ACCEPT_ALL_MAC_ADDRESSES = "accept-all-mac-addresses"
     WAIT_IP = "wait-ip"
     CONTROLLER = "controller"
+    PROFILE_NAME = "profile-name"
+    IDENTIFIER = "identifier"
+    IDENTIFIER_NAME = "name"
+    IDENTIFIER_MAC = "mac-address"
 
 
 class Route:
@@ -34,10 +38,16 @@ class Route:
     DESTINATION = "destination"
     NEXT_HOP_INTERFACE = "next-hop-interface"
     NEXT_HOP_ADDRESS = "next-hop-address"
+    SOURCE = "source"
     METRIC = "metric"
     WEIGHT = "weight"
+    ROUTETYPE = "route-type"
+    ROUTETYPE_BLACKHOLE = "blackhole"
+    ROUTETYPE_UNREACHABLE = "unreachable"
+    ROUTETYPE_PROHIBIT = "prohibit"
     USE_DEFAULT_METRIC = -1
     USE_DEFAULT_ROUTE_TABLE = 0
+    CWND = "cwnd"
 
 
 class RouteRule:
@@ -61,6 +71,7 @@ class RouteRule:
     ACTION_BLACKHOLE = "blackhole"
     ACTION_UNREACHABLE = "unreachable"
     ACTION_PROHIBIT = "prohibit"
+    SUPPRESS_PREFIX_LENGTH = "suppress-prefix-length"
 
 
 class DNS:
@@ -69,6 +80,7 @@ class DNS:
     CONFIG = "config"
     SERVER = "server"
     SEARCH = "search"
+    OPTIONS = "options"
 
 
 class Constants:
@@ -92,9 +104,11 @@ class InterfaceType:
     BOND = "bond"
     DUMMY = "dummy"
     ETHERNET = "ethernet"
+    HSR = "hsr"
     LINUX_BRIDGE = "linux-bridge"
     MAC_VLAN = "mac-vlan"
     MAC_VTAP = "mac-vtap"
+    MACSEC = "macsec"
     OVS_BRIDGE = "ovs-bridge"
     OVS_INTERFACE = "ovs-interface"
     OVS_PORT = "ovs-port"
@@ -106,17 +120,23 @@ class InterfaceType:
     VETH = "veth"
     OTHER = "other"
     LOOPBACK = "loopback"
+    IPSEC = "ipsec"
+    IPVLAN = "ipvlan"
 
     VIRT_TYPES = (
         BOND,
         DUMMY,
+        HSR,
         LINUX_BRIDGE,
+        MACSEC,
         OVS_BRIDGE,
         OVS_PORT,
         OVS_INTERFACE,
         VETH,
         VLAN,
         VXLAN,
+        IPSEC,
+        IPVLAN,
     )
 
 
@@ -125,6 +145,11 @@ class InterfaceIP:
     ADDRESS = "address"
     ADDRESS_IP = "ip"
     ADDRESS_PREFIX_LENGTH = "prefix-length"
+    ADDRESS_VALID_LEFT = "valid-life-time"
+    ADDRESS_VALID_LIFE_TIME = "valid-life-time"
+    ADDRESS_PREFERRED_LEFT = "preferred-life-time"
+    ADDRESS_PREFERRED_LIFE_TIME = "preferred-life-time"
+    ADDRESS_LIFETIME_FOREVER = "forever"
     DHCP = "dhcp"
     AUTO_DNS = "auto-dns"
     AUTO_GATEWAY = "auto-gateway"
@@ -133,6 +158,8 @@ class InterfaceIP:
     AUTO_ROUTE_METRIC = "auto-route-metric"
     MPTCP_FLAGS = "mptcp-flags"
     ALLOW_EXTRA_ADDRESS = "allow-extra-address"
+    DHCP_SEND_HOSTNAME = "dhcp-send-hostname"
+    DHCP_CUSTOM_HOSTNAME = "dhcp-custom-hostname"
 
 
 class InterfaceIPv4(InterfaceIP):
@@ -156,6 +183,12 @@ class Bond:
     PORT = "port"
     PORTS = "ports"
     OPTIONS_SUBTREE = "options"
+    PORTS_CONFIG_SUBTREE = "ports-config"
+
+    class PortsConfig:
+        NAME = "name"
+        PRIORITY = "priority"
+        QUEUE_ID = "queue-id"
 
 
 class BondMode:
@@ -173,6 +206,14 @@ class Bridge:
     OPTIONS_SUBTREE = "options"
     PORT_SUBTREE = "port"
     PORTS_SUBTREE = "ports"
+    STP_SUBTREE = "stp"
+
+    class STP:
+        ENABLED = "enabled"
+        FORWARD_DELAY = "forward-delay"
+        HELLO_TIME = "hello-time"
+        MAX_AGE = "max-age"
+        PRIORITY = "priority"
 
     class Port:
         NAME = "name"
@@ -198,7 +239,6 @@ class Bridge:
 
 class LinuxBridge(Bridge):
     TYPE = "linux-bridge"
-    STP_SUBTREE = "stp"
     MULTICAST_SUBTREE = "multicast"
 
     class Options:
@@ -221,6 +261,7 @@ class LinuxBridge(Bridge):
         MULTICAST_STARTUP_QUERY_COUNT = "multicast-startup-query-count"
         MULTICAST_STARTUP_QUERY_INTERVAL = "multicast-startup-query-interval"
         VLAN_PROTOCOL = "vlan-protocol"
+        VLAN_DEFAULT_PVID = "vlan-default-pvid"
 
         # Read only properties begin
         HELLO_TIMER = "hello-timer"
@@ -231,13 +272,6 @@ class LinuxBridge(Bridge):
         STP_HAIRPIN_MODE = "stp-hairpin-mode"
         STP_PATH_COST = "stp-path-cost"
         STP_PRIORITY = "stp-priority"
-
-    class STP:
-        ENABLED = "enabled"
-        FORWARD_DELAY = "forward-delay"
-        HELLO_TIME = "hello-time"
-        MAX_AGE = "max-age"
-        PRIORITY = "priority"
 
 
 class Ethernet:
@@ -254,6 +288,7 @@ class Ethernet:
     SRIOV_SUBTREE = "sr-iov"
 
     class SRIOV:
+        DRIVERS_AUTOPROBE = "drivers-autoprobe"
         TOTAL_VFS = "total-vfs"
         VFS_SUBTREE = "vfs"
 
@@ -266,6 +301,7 @@ class Ethernet:
             MAX_TX_RATE = "max-tx-rate"
             VLAN_ID = "vlan-id"
             QOS = "qos"
+            VLAN_PROTO = "vlan-proto"
 
 
 class Veth:
@@ -281,8 +317,15 @@ class VLAN:
 
     ID = "id"
     BASE_IFACE = "base-iface"
+    PROTOCOL = "protocol"
     PROTOCOL_802_1AD = "802.1ad"
     PROTOCOL_802_1Q = "802.1q"
+    REGISTRATION_PROTOCOL = "registration-protocol"
+    REGISTRATION_PROTOCOL_GVRP = "gvrp"
+    REGISTRATION_PROTOCOL_MVRP = "mvrp"
+    REGISTRATION_PROTOCOL_NONE = "none"
+    REORDER_HEADERS = "reorder-headers"
+    LOOSE_BINDING = "loose-binding"
 
 
 class VXLAN:
@@ -291,6 +334,8 @@ class VXLAN:
 
     ID = "id"
     BASE_IFACE = "base-iface"
+    LEARNING = "learning"
+    LOCAL = "local"
     REMOTE = "remote"
     DESTINATION_PORT = "destination-port"
 
@@ -301,6 +346,21 @@ class OvsDB:
     # Don't use hypen as this is OVS data base entry
     EXTERNAL_IDS = "external_ids"
     OTHER_CONFIG = "other_config"
+
+
+class Ovn:
+    KEY = "ovn"
+    OVN_SUBTREE = "ovn"
+    BRIDGE_MAPPINGS = "bridge-mappings"
+
+    class BridgeMappings:
+        LOCALNET = "localnet"
+        BRIDGE = "bridge"
+        STATE = "state"
+
+    class BridgeMappingsState:
+        PRESENT = "present"
+        ABSENT = "absent"
 
 
 class OVSInterface(OvsDB):
@@ -320,6 +380,7 @@ class OVSInterface(OvsDB):
 
 class OVSBridge(Bridge, OvsDB):
     TYPE = "ovs-bridge"
+    ALLOW_EXTRA_PATCH_PORTS = "allow-extra-patch-ports"
 
     class Options:
         FAIL_MODE = "fail-mode"
@@ -401,6 +462,46 @@ class MacVtap(MacVlan):
     CONFIG_SUBTREE = "mac-vtap"
 
 
+class MacSec:
+    CONFIG_SUBTREE = "macsec"
+    ENCRYPT = "encrypt"
+    BASE_IFACE = "base-iface"
+    MKA_CAK = "mka-cak"
+    MKA_CKN = "mka-ckn"
+    PORT = "port"
+    VALIDATION = "validation"
+    VALIDATION_DISABLED = "disabled"
+    VALIDATION_CHECK = "check"
+    VALIDATION_STRICT = "strict"
+    SEND_SCI = "send-sci"
+    OFFLOAD = "offload"
+    OFFLOAD_OFF = "off"
+    OFFLOAD_PHY = "phy"
+    OFFLOAD_MAC = "mac"
+
+
+class Hsr:
+    CONFIG_SUBTREE = "hsr"
+    PORT1 = "port1"
+    PORT2 = "port2"
+    SUPERVISION_ADDRESS = "supervision-address"
+    MULTICAST_SPEC = "multicast-spec"
+    PROTOCOL = "protocol"
+
+
+class IpVlan:
+    CONFIG_SUBTREE = "ipvlan"
+    BASE_IFACE = "base-iface"
+    MODE = "mode"
+    PRIVATE = "private"
+    VEPA = "vepa"
+
+    class Mode:
+        L2 = "l2"
+        L3 = "l3"
+        L3S = "l3s"
+
+
 class Ieee8021X:
     CONFIG_SUBTREE = "802.1x"
     IDENTITY = "identity"
@@ -409,6 +510,8 @@ class Ieee8021X:
     PRIVATE_KEY_PASSWORD = "private-key-password"
     CLIENT_CERT = "client-cert"
     CA_CERT = "ca-cert"
+    PHASE2_AUTH = "phase2-auth"
+    PASSWORD = "password"
 
 
 class Ethtool:
@@ -468,3 +571,7 @@ class Mptcp:
     FLAG_SUBFLOW = "subflow"
     FLAG_BACKUP = "backup"
     FLAG_FULLMESH = "fullmesh"
+
+
+class Description:
+    KEY = "description"

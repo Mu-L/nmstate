@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::convert::TryFrom;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use log::debug;
@@ -11,13 +12,14 @@ use super::{
     },
     connection::{nm_con_get_from_obj_path, NmConnection},
     dbus::NmDbus,
-    device::{
-        nm_dev_delete, nm_dev_from_obj_path, nm_dev_get_llpd, NmDevice,
-        NmDeviceState, NmDeviceStateReason,
-    },
+    device::{NmDevice, NmDeviceState, NmDeviceStateReason},
     dns::{NmDnsEntry, NmGlobalDnsConfig},
     error::{ErrorKind, NmError},
     lldp::NmLldpNeighbor,
+    query_apply::device::{
+        nm_dev_delete, nm_dev_from_obj_path, nm_dev_get_llpd,
+    },
+    NmIfaceType,
 };
 
 pub struct NmApi<'a> {
@@ -28,7 +30,19 @@ pub struct NmApi<'a> {
     auto_cp_refresh: bool,
 }
 
-impl<'a> NmApi<'a> {
+pub struct NmVersionInfo {
+    pub version_encoded: u32,
+    capabilities: Vec<u32>,
+}
+
+#[derive(Eq, PartialEq)]
+pub struct NmVersion {
+    pub major: u8,
+    pub minor: u8,
+    pub micro: u8,
+}
+
+impl NmApi<'_> {
     pub fn new() -> Result<Self, NmError> {
         Ok(Self {
             dbus: NmDbus::new()?,
@@ -49,8 +63,14 @@ impl<'a> NmApi<'a> {
         self.auto_cp_refresh = value;
     }
 
-    pub fn version(&self) -> Result<String, NmError> {
-        self.dbus.version()
+    pub fn version(&self) -> Result<NmVersion, NmError> {
+        self.dbus.version().and_then(|ver| ver.parse())
+    }
+
+    pub fn version_info(&self) -> Result<NmVersionInfo, NmError> {
+        self.dbus
+            .version_info()
+            .map(|version_info_arr| NmVersionInfo::from(&version_info_arr))
     }
 
     pub fn checkpoint_create(
@@ -153,7 +173,26 @@ impl<'a> NmApi<'a> {
         for nm_dev_obj_path in nm_dev_obj_paths {
             self.extend_timeout_if_required()?;
             match self.dbus.nm_dev_applied_connection_get(&nm_dev_obj_path) {
-                Ok(nm_conn) => nm_conns.push(nm_conn),
+                Ok(mut nm_conn) => {
+                    // Fill the interface name from NmDevice if empty
+                    if nm_conn
+                        .connection
+                        .as_ref()
+                        .map(|c| c.iface_name.is_none())
+                        .unwrap_or_default()
+                    {
+                        if let (Ok(nm_dev), Some(nm_set)) = (
+                            nm_dev_from_obj_path(
+                                &self.dbus.connection,
+                                &nm_dev_obj_path,
+                            ),
+                            nm_conn.connection.as_mut(),
+                        ) {
+                            nm_set.iface_name = Some(nm_dev.name.clone());
+                        }
+                    }
+                    nm_conns.push(nm_conn)
+                }
                 Err(e) => {
                     debug!(
                         "Ignoring error when get applied connection for \
@@ -202,14 +241,22 @@ impl<'a> NmApi<'a> {
     ) -> Result<(), NmError> {
         debug!("connection_reapply: {:?}", nm_conn);
         self.extend_timeout_if_required()?;
-        if let Some(iface_name) = nm_conn.iface_name() {
-            let nm_dev_obj_path = self.dbus.nm_dev_obj_path_get(iface_name)?;
-            self.dbus.nm_dev_reapply(&nm_dev_obj_path, nm_conn)
+
+        // We cannot use `org.freedesktop.NetworkManager.GetDeviceByIpIface`
+        // because OVS bridge/port/iface might hold identical device name.
+        // Need to check interface type also.
+        if let (Some(iface_name), Some(nm_iface_type)) =
+            (nm_conn.iface_name(), nm_conn.iface_type())
+        {
+            let nm_dev_obj_path =
+                self.get_disk_obj_path(iface_name, nm_iface_type)?;
+            self.dbus.nm_dev_reapply(nm_dev_obj_path.as_str(), nm_conn)
         } else {
             Err(NmError::new(
-                ErrorKind::InvalidArgument,
+                ErrorKind::Bug,
                 format!(
-                    "Failed to extract interface name from connection {nm_conn:?}"
+                    "Failed to extract interface name and type from \
+                    connection {nm_conn:?}"
                 ),
             ))
         }
@@ -302,7 +349,6 @@ impl<'a> NmApi<'a> {
             let nm_devs = self.devices_get()?;
             for nm_dev in &nm_devs {
                 if nm_dev.state_reason == NmDeviceStateReason::NewActivation
-                    || nm_dev.state == NmDeviceState::IpConfig
                     || nm_dev.state == NmDeviceState::Deactivating
                 {
                     waiting_nm_dev.push(nm_dev);
@@ -381,6 +427,117 @@ impl<'a> NmApi<'a> {
     ) -> Result<(), NmError> {
         self.extend_timeout_if_required()?;
         self.dbus.set_global_dns_configuration(config.to_value()?)
+    }
+
+    // We have to search all NmDevice because OVS port might hold identical
+    // interface name as OVS system interface.
+    fn get_disk_obj_path(
+        &mut self,
+        iface_name: &str,
+        nm_iface_type: &NmIfaceType,
+    ) -> Result<String, NmError> {
+        if let Some(nm_dev) = self.devices_get()?.into_iter().find(|d| {
+            d.name == iface_name
+                && ((&d.iface_type == nm_iface_type)
+                    || ([NmIfaceType::Veth, NmIfaceType::Ethernet]
+                        .contains(nm_iface_type)
+                        && [NmIfaceType::Veth, NmIfaceType::Ethernet]
+                            .contains(&d.iface_type)))
+        }) {
+            Ok(nm_dev.obj_path)
+        } else {
+            Err(NmError::new(
+                ErrorKind::InvalidArgument,
+                format!("Interface {iface_name}/{nm_iface_type} not found"),
+            ))
+        }
+    }
+}
+
+impl NmVersionInfo {
+    pub const CAPABILITY_SYNC_ROUTE_WITH_TABLE: usize = 0;
+
+    fn from(ver_info_arr: &[u32]) -> Self {
+        Self {
+            version_encoded: *ver_info_arr.first().unwrap_or(&0),
+            capabilities: ver_info_arr[1..].to_vec(),
+        }
+    }
+
+    pub fn version(&self) -> NmVersion {
+        NmVersion {
+            major: ((self.version_encoded >> 16) & 0xFF) as u8,
+            minor: ((self.version_encoded >> 8) & 0xFF) as u8,
+            micro: (self.version_encoded & 0xFF) as u8,
+        }
+    }
+
+    pub fn has_capability(&self, cap: usize) -> bool {
+        let idx = cap / 32;
+        let bit = cap % 32;
+        match self.capabilities.get(idx) {
+            Some(chunk) => (*chunk & (1 << bit)) != 0,
+            None => false,
+        }
+    }
+}
+
+impl NmVersion {
+    pub fn new(major: u8, minor: u8, micro: u8) -> NmVersion {
+        NmVersion {
+            major,
+            minor,
+            micro,
+        }
+    }
+
+    pub fn encoded(&self) -> u32 {
+        ((self.major as u32) << 16)
+            | ((self.minor as u32) << 8)
+            | (self.micro as u32)
+    }
+}
+
+impl Ord for NmVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.encoded().cmp(&other.encoded())
+    }
+}
+
+impl PartialOrd for NmVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl FromStr for NmVersion {
+    type Err = NmError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(ver) = s
+            .split('.')
+            .take(3)
+            .map(|v| v.parse::<u8>())
+            .collect::<Result<Vec<u8>, _>>()
+        {
+            if ver.len() == 3 {
+                return Ok(NmVersion {
+                    major: ver[0],
+                    minor: ver[1],
+                    micro: ver[2],
+                });
+            }
+        }
+        Err(NmError::new(
+            ErrorKind::InvalidArgument,
+            format!("Cannot parse version '{s}'"),
+        ))
+    }
+}
+
+impl std::fmt::Display for NmVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.micro)
     }
 }
 

@@ -1,13 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::convert::TryInto;
+
+use nmstate::{
+    BaseInterface, BondConfig, BondInterface, BondMode, BondPortConfig,
+    Interface, InterfaceState, InterfaceType, Interfaces, LldpNeighborTlv,
+    NetworkState, VlanConfig, VlanInterface,
+};
 
 use crate::error::CliError;
-use nmstate::{
-    BaseInterface, BondConfig, BondInterface, BondMode, Interface,
-    InterfaceState, InterfaceType, Interfaces, LldpNeighborTlv, NetworkState,
-    VlanConfig, VlanInterface,
-};
 
 const APP_NAME: &str = "nmstatectl-autoconf";
 const BOND_PREFIX: &str = "bond";
@@ -98,7 +100,7 @@ fn get_lldp_vlans(net_state: &NetworkState) -> HashMap<(u32, &str), Vec<&str>> {
                 for lldp_tlv in lldp_tlvs {
                     if let LldpNeighborTlv::Ieee8021Vlans(lldp_vlans) = lldp_tlv
                     {
-                        for lldp_vlan in &lldp_vlans.0 {
+                        for lldp_vlan in &lldp_vlans.ieee_802_1_vlans {
                             match ret
                                 .entry((lldp_vlan.vid, lldp_vlan.name.as_str()))
                             {
@@ -146,10 +148,17 @@ fn gen_bond_iface(bond_name: &str, ifaces: &[&str]) -> Interface {
     let mut bond_conf = BondConfig::new();
     bond_conf.mode = Some(BondMode::RoundRobin);
     bond_conf.port = Some(ifaces.iter().map(|i| i.to_string()).collect());
+    let mut port_confs: Vec<BondPortConfig> = Vec::new();
+    for port_name in ifaces.iter().map(|i| i.to_string()) {
+        let mut port_conf = BondPortConfig::new();
+        port_conf.name = port_name;
+        port_confs.push(port_conf);
+    }
+    bond_conf.ports_config = Some(port_confs);
     let mut bond_iface = BondInterface::new();
     bond_iface.base = base_iface;
     bond_iface.bond = Some(bond_conf);
-    Interface::Bond(bond_iface)
+    Interface::Bond(Box::new(bond_iface))
 }
 
 fn gen_vlan_iface(vlan_name: &str, id: u32, parent: &str) -> Interface {
@@ -158,10 +167,10 @@ fn gen_vlan_iface(vlan_name: &str, id: u32, parent: &str) -> Interface {
     base_iface.iface_type = InterfaceType::Vlan;
     base_iface.state = InterfaceState::Up;
     let mut vlan_conf = VlanConfig::default();
-    vlan_conf.base_iface = parent.to_string();
+    vlan_conf.base_iface = Some(parent.to_string());
     vlan_conf.id = id.try_into().unwrap();
     let mut vlan_iface = VlanInterface::new();
     vlan_iface.base = base_iface;
     vlan_iface.vlan = Some(vlan_conf);
-    Interface::Vlan(vlan_iface)
+    Interface::Vlan(Box::new(vlan_iface))
 }

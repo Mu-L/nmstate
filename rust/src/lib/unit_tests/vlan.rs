@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    ErrorKind, InterfaceType, Interfaces, MergedInterfaces, VlanInterface,
+    ErrorKind, Interface, InterfaceType, Interfaces, MergedInterface,
+    MergedInterfaces, VlanInterface, VlanProtocol,
 };
 
 #[test]
@@ -24,7 +25,7 @@ vlan:
 #[test]
 fn test_vlan_get_parent_up_priority_plus_one() {
     let desired: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: bond0.100
   type: vlan
   vlan:
@@ -41,7 +42,7 @@ fn test_vlan_get_parent_up_priority_plus_one() {
     port:
     - bond0
     - bond0.100
-    route-table-id: 1000"#,
+    route-table-id: 1000",
     )
     .unwrap();
 
@@ -76,7 +77,7 @@ fn test_vlan_get_parent_up_priority_plus_one() {
 #[test]
 fn test_vlan_orphan_check_auto_absent() {
     let current: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
         - name: bond0.100
           type: vlan
           vlan:
@@ -85,14 +86,14 @@ fn test_vlan_orphan_check_auto_absent() {
         - name: bond0
           type: bond
           link-aggregation:
-            mode: balance-rr"#,
+            mode: balance-rr",
     )
     .unwrap();
     let desired: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
         - name: bond0
           type: bond
-          state: absent"#,
+          state: absent",
     )
     .unwrap();
 
@@ -112,7 +113,7 @@ fn test_vlan_orphan_check_auto_absent() {
 #[test]
 fn test_vlan_orphan_but_desired() {
     let current: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
         - name: bond0.100
           type: vlan
           vlan:
@@ -121,15 +122,15 @@ fn test_vlan_orphan_but_desired() {
         - name: bond0
           type: bond
           link-aggregation:
-            mode: balance-rr"#,
+            mode: balance-rr",
     )
     .unwrap();
     let desired: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
         - name: bond0.100
         - name: bond0
           type: bond
-          state: absent"#,
+          state: absent",
     )
     .unwrap();
 
@@ -148,7 +149,7 @@ fn test_vlan_orphan_but_desired() {
 #[test]
 fn test_vlan_orphan_has_now_parent() {
     let current: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
         - name: bond0.100
           type: vlan
           vlan:
@@ -157,11 +158,11 @@ fn test_vlan_orphan_has_now_parent() {
         - name: bond0
           type: bond
           link-aggregation:
-            mode: balance-rr"#,
+            mode: balance-rr",
     )
     .unwrap();
     let desired: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
         - name: bond0.100
           state: up
           type: vlan
@@ -175,9 +176,65 @@ fn test_vlan_orphan_has_now_parent() {
             mode: balance-rr
         - name: bond0
           type: bond
-          state: absent"#,
+          state: absent",
     )
     .unwrap();
 
     MergedInterfaces::new(desired, current, false, false).unwrap();
+}
+
+#[test]
+fn test_vlan_update() {
+    let mut iface1: VlanInterface = serde_yaml::from_str(
+        r"---
+        name: bond0.100
+        type: vlan
+        vlan:
+          base-iface: bond0
+          id: 100",
+    )
+    .unwrap();
+
+    let iface2: VlanInterface = serde_yaml::from_str(
+        r"---
+        name: bond0.100
+        type: vlan
+        vlan:
+          base-iface: bond0
+          id: 100
+          protocol: 802.1q",
+    )
+    .unwrap();
+
+    iface1.update_vlan(&iface2);
+
+    assert_eq!(
+        iface1.vlan.as_ref().unwrap().protocol,
+        Some(VlanProtocol::Ieee8021Q)
+    );
+}
+
+#[test]
+fn test_vlan_base_iface_optional() {
+    let current: Interface = serde_yaml::from_str(
+        r"---
+        name: vlan1
+        type: vlan
+        vlan:
+          base-iface: eth0
+          id: 100",
+    )
+    .unwrap();
+    let desired: Interface = serde_yaml::from_str(
+        r"---
+        name: vlan1
+        type: vlan
+        vlan:
+          id: 101",
+    )
+    .unwrap();
+
+    let mut merged_iface =
+        MergedInterface::new(Some(desired), Some(current)).unwrap();
+    merged_iface.post_inter_ifaces_process().unwrap();
 }

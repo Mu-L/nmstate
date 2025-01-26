@@ -1,21 +1,4 @@
-#
-# Copyright (c) 2021 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 import pytest
 
@@ -23,15 +6,23 @@ import libnmstate
 from libnmstate.schema import DNS
 from libnmstate.schema import Interface
 from libnmstate.schema import InterfaceIPv4
+from libnmstate.schema import InterfaceIPv6
 from libnmstate.schema import InterfaceState
 from libnmstate.schema import InterfaceType
 
 from ..testlib import assertlib
 from ..testlib import cmdlib
-
+from ..testlib.env import is_k8s
+from ..testlib.env import nm_minor_version
+from ..testlib.retry import retry_till_true_or_timeout
+from ..testlib.yaml import load_yaml
 
 DUMMY0 = "dummy0"
 ETH1 = "eth1"
+
+TEST_DNS_SRVS = ["192.0.2.2", "192.0.2.1"]
+MIXED_DNS_SRVS = ["2001:db8:1::1", "192.0.2.9", "2001:db8:1::2"]
+RETRY_TIMEOUT = 10
 
 
 @pytest.fixture
@@ -98,3 +89,216 @@ def test_set_auto_dns_with_unamanged_iface_with_static_gw(
             ],
         }
         libnmstate.apply(absent_state)
+
+
+@pytest.fixture
+def all_unmanaged_with_gw_on_eth1(unmanaged_eth1_with_static_gw):
+    changed_ifaces = []
+    output = cmdlib.exec_cmd("nmcli -t -f DEVICE,STATE d".split(), check=True)[
+        1
+    ]
+    for line in output.split("\n"):
+        splited = line.split(":")
+        if len(splited) == 2:
+            iface_name, state = splited
+            if state.startswith("connected"):
+                changed_ifaces.append(iface_name)
+                cmdlib.exec_cmd(
+                    f"nmcli d set {iface_name} managed false".split(),
+                    check=True,
+                )
+    yield
+    for iface_name in changed_ifaces:
+        cmdlib.exec_cmd(
+            f"nmcli d set {iface_name} managed true".split(), check=True
+        )
+
+
+@pytest.mark.skipif(is_k8s(), reason="K8S cannot check global DNS file")
+def test_do_not_use_unmanaged_iface_for_dns(all_unmanaged_with_gw_on_eth1):
+    libnmstate.apply({DNS.KEY: {DNS.CONFIG: {DNS.SERVER: TEST_DNS_SRVS}}})
+
+    assert_global_dns(TEST_DNS_SRVS)
+
+
+@pytest.fixture
+def all_unmanaged_with_gw_on_eth1_as_ext_mgt(all_unmanaged_with_gw_on_eth1):
+    cmdlib.exec_cmd(
+        "nmcli d set eth1 managed true".split(),
+        check=True,
+    )
+    yield
+
+
+@pytest.mark.skipif(is_k8s(), reason="K8S cannot check global DNS file")
+def test_do_not_use_external_managed_iface_for_dns(
+    all_unmanaged_with_gw_on_eth1_as_ext_mgt,
+):
+    libnmstate.apply({DNS.KEY: {DNS.CONFIG: {DNS.SERVER: TEST_DNS_SRVS}}})
+
+    assert_global_dns(TEST_DNS_SRVS)
+
+
+GLOBAL_DNS_CONF_FILE = "/var/lib/NetworkManager/NetworkManager-intern.conf"
+
+
+def assert_global_dns(servers):
+    with open(GLOBAL_DNS_CONF_FILE) as fd:
+        content = fd.read()
+        for server in servers:
+            assert server in content
+
+
+@pytest.fixture
+def auto_eth1(eth1_up):
+    libnmstate.apply(
+        {
+            DNS.KEY: {DNS.CONFIG: {DNS.SERVER: [], DNS.SEARCH: []}},
+            Interface.KEY: [
+                {
+                    Interface.NAME: "eth1",
+                    Interface.TYPE: InterfaceType.ETHERNET,
+                    Interface.STATE: InterfaceState.UP,
+                    Interface.IPV4: {
+                        InterfaceIPv4.ENABLED: True,
+                        InterfaceIPv4.DHCP: True,
+                        InterfaceIPv4.AUTO_DNS: True,
+                        InterfaceIPv4.AUTO_ROUTES: True,
+                        InterfaceIPv4.AUTO_GATEWAY: True,
+                    },
+                    Interface.IPV6: {
+                        InterfaceIPv6.ENABLED: True,
+                        InterfaceIPv6.DHCP: True,
+                        InterfaceIPv6.AUTO_DNS: True,
+                        InterfaceIPv6.AUTO_ROUTES: True,
+                        InterfaceIPv6.AUTO_GATEWAY: True,
+                    },
+                }
+            ],
+        }
+    )
+    yield
+    libnmstate.apply({DNS.KEY: {DNS.CONFIG: {}}})
+
+
+def test_static_dns_search_with_auto_dns(auto_eth1):
+    libnmstate.apply(
+        {
+            DNS.KEY: {
+                DNS.CONFIG: {DNS.SEARCH: ["example.org", "example.net"]}
+            },
+        }
+    )
+    output = cmdlib.exec_cmd(
+        "nmcli -t -f ipv6.dns-search c show eth1".split(), check=True
+    )[1]
+    assert "ipv6.dns-search:example.org,example.net" in output
+
+
+@pytest.mark.skipif(is_k8s(), reason="K8S cannot check global DNS file")
+def test_global_dns_with_dns_options():
+    try:
+        libnmstate.apply(
+            {
+                DNS.KEY: {
+                    DNS.CONFIG: {
+                        DNS.SERVER: MIXED_DNS_SRVS,
+                        DNS.SEARCH: ["example.org", "example.net"],
+                        DNS.OPTIONS: ["rotate", "debug"],
+                    }
+                },
+            }
+        )
+    finally:
+        libnmstate.apply(
+            {
+                DNS.KEY: {DNS.CONFIG: {}},
+            }
+        )
+
+
+@pytest.fixture
+def static_dns():
+    libnmstate.apply({DNS.KEY: {DNS.CONFIG: {DNS.SERVER: TEST_DNS_SRVS}}})
+
+    cur_dns_config = libnmstate.show()[DNS.KEY][DNS.CONFIG]
+    assert cur_dns_config[DNS.SERVER] == TEST_DNS_SRVS
+
+    yield
+    libnmstate.apply(
+        {
+            DNS.KEY: {DNS.CONFIG: {}},
+        }
+    )
+
+
+@pytest.mark.skipif(
+    nm_minor_version() <= 47,
+    reason="NM 1.47- does not support checkpoint on global dns",
+)
+@pytest.mark.skipif(is_k8s(), reason="K8S cannot check global DNS file")
+# kubernetes-nmstate depends on checkpoint to rollback to original state when
+# check fails, hence tier1
+@pytest.mark.tier1
+def test_rollback_on_global_dns(static_dns):
+    libnmstate.apply(
+        {
+            DNS.KEY: {
+                DNS.CONFIG: {
+                    # Mixing IPv6 and IPv4 name servers will force nmstate
+                    # to use global DNS API of NetworkManager
+                    DNS.SERVER: MIXED_DNS_SRVS,
+                }
+            },
+        },
+        commit=False,
+    )
+
+    assert_global_dns(MIXED_DNS_SRVS)
+
+    libnmstate.rollback()
+
+    def check_dns(srvs):
+        cur_dns_config = libnmstate.show()[DNS.KEY][DNS.CONFIG]
+        return cur_dns_config[DNS.SERVER] == srvs
+
+    assert retry_till_true_or_timeout(RETRY_TIMEOUT, check_dns, TEST_DNS_SRVS)
+
+
+@pytest.fixture
+def clean_dns():
+    yield
+    libnmstate.apply({DNS.KEY: {DNS.CONFIG: {}}})
+
+
+# https://issues.redhat.com/browse/RHEL-56557
+@pytest.mark.tier1
+@pytest.mark.skipif(is_k8s(), reason="K8S cannot check global DNS file")
+def test_reselect_iface_dns_if_desired(eth1_up):
+    libnmstate.apply({DNS.KEY: {DNS.CONFIG: {DNS.SERVER: TEST_DNS_SRVS}}})
+    assert_global_dns(TEST_DNS_SRVS)
+
+    state = load_yaml(
+        """---
+        dns-resolver:
+          config:
+            server: {}
+        interfaces:
+        - name: eth1
+          type: ethernet
+          state: up
+          ipv4:
+            address:
+            - ip: 192.0.2.251
+              prefix-length: 24
+            dhcp: false
+            enabled: true
+        """.format(
+            TEST_DNS_SRVS
+        )
+    )
+
+    libnmstate.apply(state)
+    assert cmdlib.exec_cmd(
+        "nmcli -g ipv4.dns c show eth1".split(), check=True
+    )[1].strip() == ",".join(TEST_DNS_SRVS)

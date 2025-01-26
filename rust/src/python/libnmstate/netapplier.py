@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
 # Copyright 2021 Red Hat
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,6 +27,7 @@ def apply(
     save_to_disk=True,
     commit=True,
     rollback_timeout=60,
+    override_iface=False,
 ):
     return apply_net_state(
         desired_state,
@@ -33,6 +36,7 @@ def apply(
         save_to_disk=save_to_disk,
         commit=commit,
         rollback_timeout=rollback_timeout,
+        override_iface=override_iface,
     )
 
 

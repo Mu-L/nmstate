@@ -9,14 +9,17 @@ use serde::Deserialize;
 use zvariant::{Signature, Type};
 
 use super::super::{
-    connection::bond::NmSettingBond,
+    connection::bond::{NmSettingBond, NmSettingBondPort},
     connection::bridge::{NmSettingBridge, NmSettingBridgePort},
     connection::ethtool::NmSettingEthtool,
+    connection::hsr::NmSettingHsr,
     connection::ieee8021x::NmSetting8021X,
     connection::infiniband::NmSettingInfiniBand,
     connection::ip::NmSettingIp,
+    connection::ipvlan::NmSettingIpVlan,
     connection::loopback::NmSettingLoopback,
     connection::mac_vlan::NmSettingMacVlan,
+    connection::macsec::NmSettingMacSec,
     connection::ovs::{
         NmSettingOvsBridge, NmSettingOvsDpdk, NmSettingOvsExtIds,
         NmSettingOvsIface, NmSettingOvsOtherConfig, NmSettingOvsPatch,
@@ -26,11 +29,12 @@ use super::super::{
     connection::user::NmSettingUser,
     connection::veth::NmSettingVeth,
     connection::vlan::NmSettingVlan,
+    connection::vpn::NmSettingVpn,
     connection::vrf::NmSettingVrf,
     connection::vxlan::NmSettingVxlan,
     connection::wired::NmSettingWired,
     convert::ToDbusValue,
-    NmError,
+    NmError, NmIfaceType,
 };
 
 const NM_AUTOCONENCT_PORT_DEFAULT: i32 = -1;
@@ -79,6 +83,7 @@ fn from_u32_to_vec_nm_conn_flags(i: u32) -> Vec<NmSettingsConnectionFlag> {
 pub struct NmConnection {
     pub connection: Option<NmSettingConnection>,
     pub bond: Option<NmSettingBond>,
+    pub bond_port: Option<NmSettingBondPort>,
     pub bridge: Option<NmSettingBridge>,
     pub bridge_port: Option<NmSettingBridgePort>,
     pub ipv4: Option<NmSettingIp>,
@@ -102,6 +107,10 @@ pub struct NmConnection {
     pub ethtool: Option<NmSettingEthtool>,
     pub infiniband: Option<NmSettingInfiniBand>,
     pub loopback: Option<NmSettingLoopback>,
+    pub macsec: Option<NmSettingMacSec>,
+    pub hsr: Option<NmSettingHsr>,
+    pub vpn: Option<NmSettingVpn>,
+    pub ipvlan: Option<NmSettingIpVlan>,
     #[serde(skip)]
     pub obj_path: String,
     #[serde(skip)]
@@ -131,6 +140,7 @@ impl TryFrom<NmConnectionDbusOwnedValue> for NmConnection {
             ipv4: _from_map!(v, "ipv4", NmSettingIp::try_from)?,
             ipv6: _from_map!(v, "ipv6", NmSettingIp::try_from)?,
             bond: _from_map!(v, "bond", NmSettingBond::try_from)?,
+            bond_port: _from_map!(v, "bond-port", NmSettingBondPort::try_from)?,
             bridge: _from_map!(v, "bridge", NmSettingBridge::try_from)?,
             bridge_port: _from_map!(
                 v,
@@ -165,6 +175,7 @@ impl TryFrom<NmConnectionDbusOwnedValue> for NmConnection {
             vxlan: _from_map!(v, "vxlan", NmSettingVxlan::try_from)?,
             sriov: _from_map!(v, "sriov", NmSettingSriov::try_from)?,
             mac_vlan: _from_map!(v, "macvlan", NmSettingMacVlan::try_from)?,
+            macsec: _from_map!(v, "macsec", NmSettingMacSec::try_from)?,
             vrf: _from_map!(v, "vrf", NmSettingVrf::try_from)?,
             veth: _from_map!(v, "veth", NmSettingVeth::try_from)?,
             ieee8021x: _from_map!(v, "802-1x", NmSetting8021X::try_from)?,
@@ -176,6 +187,9 @@ impl TryFrom<NmConnectionDbusOwnedValue> for NmConnection {
                 NmSettingInfiniBand::try_from
             )?,
             loopback: _from_map!(v, "loopback", NmSettingLoopback::try_from)?,
+            hsr: _from_map!(v, "hsr", NmSettingHsr::try_from)?,
+            vpn: _from_map!(v, "vpn", NmSettingVpn::try_from)?,
+            ipvlan: _from_map!(v, "ipvlan", NmSettingIpVlan::try_from)?,
             _other: v,
             ..Default::default()
         })
@@ -187,20 +201,23 @@ impl NmConnection {
         _connection_inner_string_member!(self, iface_name)
     }
 
-    pub fn iface_type(&self) -> Option<&str> {
-        _connection_inner_string_member!(self, iface_type)
+    pub fn iface_type(&self) -> Option<&NmIfaceType> {
+        self.connection.as_ref().and_then(|c| c.iface_type.as_ref())
     }
 
     pub fn id(&self) -> Option<&str> {
         _connection_inner_string_member!(self, id)
     }
 
+    #[allow(dead_code)]
     pub fn controller(&self) -> Option<&str> {
         _connection_inner_string_member!(self, controller)
     }
 
-    pub fn controller_type(&self) -> Option<&str> {
-        _connection_inner_string_member!(self, controller_type)
+    pub fn controller_type(&self) -> Option<&NmIfaceType> {
+        self.connection
+            .as_ref()
+            .and_then(|c| c.controller_type.as_ref())
     }
 
     #[cfg(feature = "query_apply")]
@@ -260,6 +277,9 @@ impl NmConnection {
         if let Some(mac_vlan) = &self.mac_vlan {
             ret.insert("macvlan", mac_vlan.to_value()?);
         }
+        if let Some(macsec) = &self.macsec {
+            ret.insert("macsec", macsec.to_value()?);
+        }
         if let Some(vrf) = &self.vrf {
             ret.insert("vrf", vrf.to_value()?);
         }
@@ -281,6 +301,18 @@ impl NmConnection {
         if let Some(v) = &self.loopback {
             ret.insert("loopback", v.to_value()?);
         }
+        if let Some(hsr) = &self.hsr {
+            ret.insert("hsr", hsr.to_value()?);
+        }
+        if let Some(v) = &self.bond_port {
+            ret.insert("bond-port", v.to_value()?);
+        }
+        if let Some(v) = &self.vpn {
+            ret.insert("vpn", v.to_value()?);
+        }
+        if let Some(ipvlan) = &self.ipvlan {
+            ret.insert("ipvlan", ipvlan.to_value()?);
+        }
         for (key, setting_value) in &self._other {
             let mut other_setting_value: HashMap<&str, zvariant::Value> =
                 HashMap::new();
@@ -293,21 +325,6 @@ impl NmConnection {
             ret.insert(key, other_setting_value);
         }
         Ok(ret)
-    }
-
-    pub fn set_parent(&mut self, parent: &str) {
-        if let Some(setting) = self.vlan.as_mut() {
-            setting.parent = Some(parent.to_string());
-        }
-        if let Some(setting) = self.vxlan.as_mut() {
-            setting.parent = Some(parent.to_string());
-        }
-        if let Some(setting) = self.infiniband.as_mut() {
-            setting.parent = Some(parent.to_string());
-        }
-        if let Some(setting) = self.mac_vlan.as_mut() {
-            setting.parent = Some(parent.to_string());
-        }
     }
 
     pub fn uuid(&self) -> Option<&str> {
@@ -326,10 +343,10 @@ impl NmConnection {
 pub struct NmSettingConnection {
     pub id: Option<String>,
     pub uuid: Option<String>,
-    pub iface_type: Option<String>,
+    pub iface_type: Option<NmIfaceType>,
     pub iface_name: Option<String>,
     pub controller: Option<String>,
-    pub controller_type: Option<String>,
+    pub controller_type: Option<NmIfaceType>,
     pub autoconnect: Option<bool>,
     pub autoconnect_ports: Option<bool>,
     pub lldp: Option<bool>,
@@ -343,10 +360,14 @@ impl TryFrom<DbusDictionary> for NmSettingConnection {
         Ok(Self {
             id: _from_map!(v, "id", String::try_from)?,
             uuid: _from_map!(v, "uuid", String::try_from)?,
-            iface_type: _from_map!(v, "type", String::try_from)?,
+            iface_type: _from_map!(v, "type", NmIfaceType::try_from)?,
             iface_name: _from_map!(v, "interface-name", String::try_from)?,
             controller: _from_map!(v, "master", String::try_from)?,
-            controller_type: _from_map!(v, "slave-type", String::try_from)?,
+            controller_type: _from_map!(
+                v,
+                "slave-type",
+                NmIfaceType::try_from
+            )?,
             autoconnect: _from_map!(v, "autoconnect", bool::try_from)?
                 .or(Some(true)),
             autoconnect_ports: NmSettingConnection::i32_to_autoconnect_ports(
@@ -369,7 +390,7 @@ impl ToDbusValue for NmSettingConnection {
             ret.insert("uuid", zvariant::Value::new(v.as_str()));
         }
         if let Some(v) = &self.iface_type {
-            ret.insert("type", zvariant::Value::new(v.as_str()));
+            ret.insert("type", zvariant::Value::new(v.to_string()));
         }
         if let Some(v) = &self.iface_name {
             ret.insert("interface-name", zvariant::Value::new(v.as_str()));
@@ -378,10 +399,10 @@ impl ToDbusValue for NmSettingConnection {
             ret.insert("master", zvariant::Value::new(v.as_str()));
         }
         if let Some(v) = &self.controller_type {
-            ret.insert("slave-type", zvariant::Value::new(v.as_str()));
+            ret.insert("slave-type", zvariant::Value::new(v.to_string()));
         }
         if let Some(v) = &self.lldp {
-            ret.insert("lldp", zvariant::Value::new(v));
+            ret.insert("lldp", zvariant::Value::new(*v as i32));
         }
         if let Some(v) = &self.mptcp_flags {
             ret.insert("mptcp-flags", zvariant::Value::new(v));
@@ -444,6 +465,24 @@ pub(crate) fn nm_con_get_from_obj_path(
         {
             if let Some(nm_secret) = nm_secrets.get("802-1x") {
                 ieee_8021x_conf.fill_secrets(nm_secret);
+            }
+        }
+    }
+    if let Some(macsec_conf) = nm_conn.macsec.as_mut() {
+        if let Ok(nm_secrets) = proxy
+            .call::<&str, NmConnectionDbusOwnedValue>("GetSecrets", &"macsec")
+        {
+            if let Some(nm_secret) = nm_secrets.get("macsec") {
+                macsec_conf.fill_secrets(nm_secret);
+            }
+        }
+    }
+    if let Some(vpn_conf) = nm_conn.vpn.as_mut() {
+        if let Ok(nm_secrets) =
+            proxy.call::<&str, NmConnectionDbusOwnedValue>("GetSecrets", &"vpn")
+        {
+            if let Some(nm_secret) = nm_secrets.get("vpn") {
+                vpn_conf.fill_secrets(nm_secret);
             }
         }
     }

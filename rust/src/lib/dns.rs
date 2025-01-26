@@ -5,7 +5,31 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ip::is_ipv6_addr, ErrorKind, MergedNetworkState, NmstateError};
+use crate::{
+    ip::is_ipv6_addr, ErrorKind, MergedInterface, MergedNetworkState,
+    NmstateError,
+};
+
+const SUPPORTED_DNS_OPTS_NO_VALUE: [&str; 15] = [
+    "debug",
+    "edns0",
+    "inet6",
+    "ip6-bytestring",
+    "ip6-dotint",
+    "no-aaaa",
+    "no-check-names",
+    "no-ip6-dotint",
+    "no-reload",
+    "no-tld-query",
+    "rotate",
+    "single-request",
+    "single-request-reopen",
+    "trust-ad",
+    "use-vc",
+];
+
+const SUPPORTED_DNS_OPTS_WITH_VALUE: [&str; 3] =
+    ["ndots", "timeout", "attempts"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -29,6 +53,15 @@ use crate::{ip::is_ipv6_addr, ErrorKind, MergedNetworkState, NmstateError};
 ///      server:
 ///      - 2001:db8:1::250
 ///      - 192.0.2.250
+///      options:
+///      - trust-ad
+///      - rotate
+/// ```
+/// To purge all static DNS configuration:
+/// ```yml
+/// ---
+/// dns-resolver:
+///   config: {}
 /// ```
 pub struct DnsState {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +110,11 @@ pub struct DnsClientState {
     /// To remove all existing search, please use `Some(Vec::new())`.
     /// If undefined(set to `None`), will preserve current config.
     pub search: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// DNS option list.
+    /// To remove all existing search, please use `Some(Vec::new())`.
+    /// If undefined(set to `None`), will preserve current config.
+    pub options: Option<Vec<String>>,
     #[serde(skip)]
     // Lower is better
     pub(crate) priority: Option<i32>,
@@ -88,22 +126,13 @@ impl DnsClientState {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.server.is_none() && self.search.is_none()
-    }
-
-    // Whether user want to purge all DNS settings
-    pub(crate) fn is_purge(&self) -> bool {
-        match (&self.server, &self.search) {
-            (Some(srvs), Some(schs)) => srvs.is_empty() && schs.is_empty(),
-            (Some(srvs), None) => srvs.is_empty(),
-            (None, Some(schs)) => schs.is_empty(),
-            (None, None) => true,
-        }
+        self.server.is_none() && self.search.is_none() && self.options.is_none()
     }
 
     pub(crate) fn is_null(&self) -> bool {
         self.server.as_ref().map(|s| s.len()).unwrap_or_default() == 0
             && self.search.as_ref().map(|s| s.len()).unwrap_or_default() == 0
+            && self.options.as_ref().map(|s| s.len()).unwrap_or_default() == 0
     }
 
     // sanitize the IP addresses.
@@ -137,24 +166,60 @@ impl DnsClientState {
             }
             self.server = Some(sanitized_srvs);
         }
+        if let Some(opts) = self.options.as_ref() {
+            for opt in opts {
+                match opt.find(':') {
+                    Some(i) => {
+                        let opt = &opt[..i];
+                        if !SUPPORTED_DNS_OPTS_WITH_VALUE.contains(&opt) {
+                            return Err(NmstateError::new(
+                                ErrorKind::InvalidArgument,
+                                format!(
+                                    "Option '{opt}' is not supported to hold \
+                                    a value, only support these without \
+                                    value: {} and these with values: {}:n",
+                                    SUPPORTED_DNS_OPTS_NO_VALUE.join(", "),
+                                    SUPPORTED_DNS_OPTS_WITH_VALUE.join(":n, ")
+                                ),
+                            ));
+                        }
+                    }
+                    None => {
+                        if !SUPPORTED_DNS_OPTS_NO_VALUE.contains(&opt.as_str())
+                        {
+                            return Err(NmstateError::new(
+                                ErrorKind::InvalidArgument,
+                                format!(
+                                    "Unsupported DNS option {opt}, \
+                                    only support these without value: {} \
+                                    and these with values: {}",
+                                    SUPPORTED_DNS_OPTS_NO_VALUE.join(", "),
+                                    SUPPORTED_DNS_OPTS_WITH_VALUE.join(":n, ")
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MergedDnsState {
-    desired: DnsState,
-    current: DnsState,
+    pub(crate) desired: Option<DnsState>,
+    pub(crate) current: DnsState,
     pub(crate) servers: Vec<String>,
     pub(crate) searches: Vec<String>,
+    pub(crate) options: Vec<String>,
 }
 
 impl MergedDnsState {
     pub(crate) fn new(
-        mut desired: DnsState,
+        desired: Option<DnsState>,
         mut current: DnsState,
     ) -> Result<Self, NmstateError> {
-        desired.sanitize()?;
         current.sanitize().ok();
         let mut servers = current
             .config
@@ -167,10 +232,37 @@ impl MergedDnsState {
             .and_then(|c| c.search.clone())
             .unwrap_or_default();
 
+        let mut options = current
+            .config
+            .as_ref()
+            .and_then(|c| c.options.clone())
+            .unwrap_or_default();
+
+        let mut desired = match desired {
+            Some(d) => d,
+            None => {
+                return Ok(Self {
+                    desired: None,
+                    current,
+                    servers,
+                    searches,
+                    options,
+                });
+            }
+        };
+
+        desired.sanitize()?;
+
         if let Some(conf) = desired.config.as_ref() {
-            if conf.is_purge() {
+            //  * `server`, `search` and `options` are None. Equal to desire
+            //  state `config: {}`, means purging
+            if conf.server.is_none()
+                && conf.search.is_none()
+                && conf.options.is_none()
+            {
                 servers.clear();
                 searches.clear();
+                options.clear();
             } else {
                 if let Some(des_srvs) = conf.server.as_ref() {
                     servers.clear();
@@ -180,32 +272,25 @@ impl MergedDnsState {
                     searches.clear();
                     searches.extend_from_slice(des_schs);
                 }
+                if let Some(des_opts) = conf.options.as_ref() {
+                    options.clear();
+                    options.extend_from_slice(des_opts);
+                }
             }
         }
 
         Ok(Self {
-            desired,
+            desired: Some(desired),
             current,
             servers,
             searches,
+            options,
         })
     }
 
-    pub(crate) fn is_changed(&self) -> bool {
-        let cur_servers = self
-            .current
-            .config
-            .as_ref()
-            .and_then(|c| c.server.clone())
-            .unwrap_or_default();
-        let cur_searches = self
-            .current
-            .config
-            .as_ref()
-            .and_then(|c| c.search.clone())
-            .unwrap_or_default();
-
-        self.servers != cur_servers || self.searches != cur_searches
+    pub(crate) fn is_search_or_option_only(&self) -> bool {
+        self.servers.is_empty()
+            && (!self.searches.is_empty() || !self.options.is_empty())
     }
 }
 
@@ -293,4 +378,19 @@ pub(crate) fn parse_dns_ipv6_link_local_srv(
         }
     }
     Ok(None)
+}
+
+impl MergedInterface {
+    // IP stack is merged with current at this point.
+    pub(crate) fn is_iface_valid_for_dns(&self, is_ipv6: bool) -> bool {
+        if is_ipv6 {
+            self.merged.base_iface().ipv6.as_ref().map(|ip_conf| {
+                ip_conf.enabled && (ip_conf.is_static() || (ip_conf.is_auto()))
+            }) == Some(true)
+        } else {
+            self.merged.base_iface().ipv4.as_ref().map(|ip_conf| {
+                ip_conf.enabled && (ip_conf.is_static() || (ip_conf.is_auto()))
+            }) == Some(true)
+        }
+    }
 }

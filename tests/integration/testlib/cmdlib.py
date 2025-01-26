@@ -44,7 +44,7 @@ def exec_cmd(cmd, env=None, stdin=None, check=False):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
-        check=check,
+        check=False,
         input=stdin,
     )
 
@@ -53,7 +53,14 @@ def exec_cmd(cmd, env=None, stdin=None, check=False):
 
     logging.debug(_retcode_log_line(p.returncode, err=err))
 
-    return (p.returncode, out.decode("utf-8"), err.decode("utf-8"))
+    if check and p.returncode != 0:
+        raise Exception(
+            "Failed command {0}:\n{1}".format(
+                command_log_line(cmd), format_exec_cmd_result(p)
+            )
+        )
+
+    return (p.returncode, _decode(out), _decode(err))
 
 
 def command_log_line(args, cwd=None):
@@ -87,3 +94,10 @@ def _list2cmdline(args):
 # for including in a command passed to the shell. The safe characters were
 # stolen from pipes._safechars.
 _needs_quoting = re.compile(r"[^A-Za-z0-9_%+,\-./:=@]").search
+
+
+def _decode(str_bytes):
+    try:
+        return str_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return str_bytes.decode("latin1")

@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     BaseInterface, EthernetConfig, EthernetDuplex, EthernetInterface,
-    SrIovConfig, SrIovVfConfig,
+    SrIovConfig, SrIovVfConfig, VlanProtocol,
 };
+use std::{fs, path};
 
 pub(crate) fn np_ethernet_to_nmstate(
     np_iface: &nispor::Iface,
@@ -17,6 +20,29 @@ fn gen_eth_conf(np_iface: &nispor::Iface) -> EthernetConfig {
     let mut eth_conf = EthernetConfig::new();
     if let Some(sriov_info) = &np_iface.sriov {
         eth_conf.sr_iov = Some(gen_sriov_conf(sriov_info));
+    }
+    if let Some(sr_iov) = &mut eth_conf.sr_iov {
+        let p: path::PathBuf = [
+            "/sys/class/net",
+            &np_iface.name,
+            "device/sriov_drivers_autoprobe",
+        ]
+        .iter()
+        .collect();
+        if let Ok(contents) = fs::read_to_string(&p) {
+            match contents.as_str().trim().parse::<u8>() {
+                Ok(i) => {
+                    sr_iov.drivers_autoprobe = Some(i == 1);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "failed to parse {}: {:?}",
+                        p.to_string_lossy(),
+                        err
+                    );
+                }
+            }
+        }
     }
     if let Some(ethtool_info) = &np_iface.ethtool {
         if let Some(link_mode_info) = &ethtool_info.link_mode {
@@ -54,6 +80,17 @@ fn gen_sriov_conf(sriov_info: &nispor::SriovInfo) -> SrIovConfig {
         vf.max_tx_rate = Some(vf_info.max_tx_rate);
         vf.vlan_id = Some(vf_info.vlan_id);
         vf.qos = Some(vf_info.qos);
+        vf.vlan_proto = match &vf_info.vlan_proto {
+            nispor::VlanProtocol::Ieee8021Q => Some(VlanProtocol::Ieee8021Q),
+            nispor::VlanProtocol::Ieee8021AD => Some(VlanProtocol::Ieee8021Ad),
+            p => {
+                log::warn!(
+                    "Got unknown VLAN protocol {p:?} on SR-IOV VF {}",
+                    vf_info.id
+                );
+                None
+            }
+        };
         vfs.push(vf);
     }
     ret.total_vfs = Some(vfs.len() as u32);

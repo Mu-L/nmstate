@@ -5,7 +5,7 @@ use crate::{BaseInterface, ErrorKind, Interface, MergedInterface};
 #[test]
 fn test_valid_mptcp_flags() {
     let des_iface: Interface = serde_yaml::from_str(
-        r#"---
+        r"---
 name: eth1
 type: ethernet
 state: up
@@ -13,7 +13,7 @@ mptcp:
   address-flags:
   - signal
   - fullmesh
-"#,
+",
     )
     .unwrap();
 
@@ -84,7 +84,7 @@ ipv6:
     )
     .unwrap();
 
-    des_iface.sanitize().unwrap();
+    des_iface.sanitize(true).unwrap();
 
     assert_eq!(des_iface, expected_iface);
 }

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::convert::TryInto;
 
 use serde_json::{Map, Value};
 
@@ -16,7 +14,7 @@ const OVS_DB_NAME: &str = "Open_vSwitch";
 pub(crate) const GLOBAL_CONFIG_TABLE: &str = "Open_vSwitch";
 const NM_RESERVED_EXTERNAL_ID: &str = "NM.connection.uuid";
 
-const DEFAULT_OVS_DB_SOCKET_PATH: &str = "/run/openvswitch/db.sock";
+pub(crate) const DEFAULT_OVS_DB_SOCKET_PATH: &str = "/run/openvswitch/db.sock";
 
 #[derive(Debug)]
 pub(crate) struct OvsDbConnection {
@@ -111,7 +109,7 @@ impl OvsDbConnection {
         )? {
             Value::Array(reply) => {
                 if let Some(entries) = reply
-                    .get(0)
+                    .first()
                     .and_then(|v| v.as_object())
                     .and_then(|v| v.get("rows"))
                     .and_then(|v| v.as_array())
@@ -228,11 +226,11 @@ impl OvsDbConnection {
         )? {
             Value::Array(reply) => {
                 if let Some(global_conf) = reply
-                    .get(0)
+                    .first()
                     .and_then(|v| v.as_object())
                     .and_then(|v| v.get("rows"))
                     .and_then(|v| v.as_array())
-                    .and_then(|v| v.get(0))
+                    .and_then(|v| v.first())
                     .and_then(|v| v.as_object())
                 {
                     Ok(global_conf.into())
@@ -334,7 +332,7 @@ impl TryFrom<&Value> for OvsDbEntry {
 
 pub(crate) fn parse_str_map(v: &[Value]) -> HashMap<String, String> {
     let mut ret = HashMap::new();
-    if let Some(Value::String(value_type)) = v.get(0) {
+    if let Some(Value::String(value_type)) = v.first() {
         match value_type.as_str() {
             "map" => {
                 if let Some(ids) = v.get(1).and_then(|i| i.as_array()) {
@@ -343,7 +341,7 @@ pub(crate) fn parse_str_map(v: &[Value]) -> HashMap<String, String> {
                             if let (
                                 Some(Value::String(k)),
                                 Some(Value::String(v)),
-                            ) = (kv.get(0), kv.get(1))
+                            ) = (kv.first(), kv.get(1))
                             {
                                 if k == NM_RESERVED_EXTERNAL_ID {
                                     continue;
@@ -364,7 +362,7 @@ pub(crate) fn parse_str_map(v: &[Value]) -> HashMap<String, String> {
 
 pub(crate) fn parse_uuid_array(v: &[Value]) -> Vec<String> {
     let mut ret = Vec::new();
-    if let Some(Value::String(value_type)) = v.get(0) {
+    if let Some(Value::String(value_type)) = v.first() {
         match value_type.as_str() {
             "set" => {
                 if let Some(vs) = v.get(1).and_then(|i| i.as_array()) {
@@ -373,7 +371,7 @@ pub(crate) fn parse_uuid_array(v: &[Value]) -> Vec<String> {
                             if let (
                                 Some(Value::String(k)),
                                 Some(Value::String(v)),
-                            ) = (kv.get(0), kv.get(1))
+                            ) = (kv.first(), kv.get(1))
                             {
                                 if k != "uuid" {
                                     continue;

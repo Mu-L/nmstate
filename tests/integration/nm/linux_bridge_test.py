@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
+import json
+
 import pytest
 from contextlib import contextmanager
 
@@ -20,6 +22,7 @@ from ..testlib.dummy import nm_unmanaged_dummy
 from ..testlib.env import is_k8s
 from ..testlib.env import nm_minor_version
 from ..testlib.statelib import show_only
+from ..testlib.yaml import load_yaml
 
 
 BRIDGE0 = "brtest0"
@@ -42,8 +45,22 @@ def external_managed_bridge_with_unmanaged_ports():
         with dummy_as_port(BRIDGE0, DUMMY0), dummy_as_port(BRIDGE0, DUMMY1):
             yield
     finally:
-        exec_cmd(f"ip link delete {BRIDGE0}".split())
-        exec_cmd(f"nmcli c del {BRIDGE0}".split())
+        # After `ip link del BRIDGE0` exist, the BRIDGE0 interface still
+        # exist for a very small time window which fail the next
+        # `ip link add BRIDGE0 type bridge` command as interface is still
+        # exists. We use libnmstate instead which verification stage will
+        # ensure interface been removed
+        libnmstate.apply(
+            {
+                Interface.KEY: [
+                    {
+                        Interface.NAME: BRIDGE0,
+                        Interface.TYPE: InterfaceType.LINUX_BRIDGE,
+                        Interface.STATE: InterfaceState.ABSENT,
+                    },
+                ]
+            }
+        )
 
 
 @pytest.mark.tier1
@@ -100,8 +117,8 @@ def test_add_new_port_to_bridge_with_unmanged_port(
         )
 
         # dummy1 should still be the bridge port
-        output = exec_cmd(f"npc iface {DUMMY1}".split(), check=True)[1]
-        assert f"controller: {BRIDGE0}" in output
+        output = exec_cmd(f"ip -j link show {DUMMY1}".split(), check=True)[1]
+        assert json.loads(output)[0]["master"] == BRIDGE0
 
 
 @pytest.fixture
@@ -197,15 +214,25 @@ def test_linux_manage_bridge_keeps_unmanaged_port(
 
 @pytest.fixture
 def unmanged_veth0():
-    veth_iface = VETH0
     exec_cmd(
-        f"ip link add {veth_iface} type veth peer {veth_iface}.ep".split(),
+        f"ip link add {VETH0} type veth peer {VETH0}.ep".split(),
         check=False,
     )
-    exec_cmd(f"ip link set {veth_iface}.ep up".split(), check=True)
+    exec_cmd(f"ip link set {VETH0}.ep up".split(), check=True)
     yield
-    exec_cmd(f"ip link del {veth_iface}".split())
-    exec_cmd(f"nmcli c del {veth_iface}".split())
+    exec_cmd(f"ip link del {VETH0}".split())
+    exec_cmd(f"nmcli c del {VETH0}".split())
+    # Use nmstate to ensure veth0 is removed.
+    libnmstate.apply(
+        {
+            Interface.KEY: [
+                {
+                    Interface.NAME: VETH0,
+                    Interface.STATE: InterfaceState.ABSENT,
+                },
+            ]
+        }
+    )
 
 
 @pytest.fixture
@@ -222,12 +249,6 @@ def bridge_with_unmanaged_port(eth1_up, unmanged_veth0):
 
 
 @pytest.mark.tier1
-@pytest.mark.xfail(
-    nm_minor_version() < 39,
-    raises=AssertionError,
-    reason="https://bugzilla.redhat.com/2076131",
-    strict=True,
-)
 def test_linux_bridge_does_not_lose_unmanaged_port_on_rollback(
     bridge_with_unmanaged_port,
 ):
@@ -390,8 +411,8 @@ def test_linux_bridge_store_stp_setting_even_disabled(
 
 @pytest.fixture
 def unmangaed_dummy1_dummy2():
-    exec_cmd("ip link add dummy1 type dummy".split(), check=True)
-    exec_cmd("ip link add dummy2 type dummy".split(), check=True)
+    exec_cmd("ip link add dummy1 type dummy".split(), check=False)
+    exec_cmd("ip link add dummy2 type dummy".split(), check=False)
     exec_cmd("ip link set dummy1 up".split(), check=True)
     exec_cmd("ip link set dummy2 up".split(), check=True)
     exec_cmd("nmcli dev set dummy1 managed false".split(), check=True)
@@ -399,6 +420,21 @@ def unmangaed_dummy1_dummy2():
     yield
     exec_cmd("ip link del dummy1".split(), check=False)
     exec_cmd("ip link del dummy2".split(), check=False)
+    # Use nmstate to ensure dummy1 and dummy2 are removed.
+    libnmstate.apply(
+        {
+            Interface.KEY: [
+                {
+                    Interface.NAME: "dummy1",
+                    Interface.STATE: InterfaceState.ABSENT,
+                },
+                {
+                    Interface.NAME: "dummy2",
+                    Interface.STATE: InterfaceState.ABSENT,
+                },
+            ]
+        }
+    )
 
 
 def test_auto_manage_linux_ignored_ports(unmangaed_dummy1_dummy2):
@@ -413,3 +449,127 @@ def test_auto_manage_linux_ignored_ports(unmangaed_dummy1_dummy2):
         BRIDGE0, bridge_subtree_state=bridge_subtree_state
     ) as state:
         assertlib.assert_state_match(state)
+
+
+@pytest.fixture
+def br0_down(eth1_up):
+    with linux_bridge(
+        BRIDGE0,
+        bridge_subtree_state={
+            LB.PORT_SUBTREE: [
+                {
+                    LB.Port.NAME: "eth1",
+                }
+            ],
+            LB.OPTIONS_SUBTREE: {
+                LB.STP_SUBTREE: {
+                    LB.STP.ENABLED: False,
+                }
+            },
+        },
+    ) as state:
+        exec_cmd(f"nmcli c down {BRIDGE0}".split(), check=True)
+        yield state
+
+
+def test_activate_nmcli_down_linux_bridge(br0_down):
+    br0_up_state = br0_down
+    libnmstate.apply(br0_up_state)
+    assertlib.assert_state_match(br0_up_state)
+
+
+def test_create_down_linux_bridge(br0_down):
+    state = br0_down
+    state[Interface.KEY][0][Interface.STATE] = InterfaceState.DOWN
+    libnmstate.apply(state)
+    assertlib.assert_absent(BRIDGE0)
+    exec_cmd(f"nmcli c show {BRIDGE0}".split(), check=True)
+    exec_cmd("nmcli c show eth1".split(), check=True)
+
+
+@pytest.fixture
+def br0_with_pvid_and_unmanaged_port():
+    libnmstate.apply(
+        load_yaml(
+            f"""---
+            interfaces:
+              - name: {DUMMY1}
+                type: dummy
+              - name: {BRIDGE0}
+                type: linux-bridge
+                state: up
+                bridge:
+                  port:
+                    - name: {DUMMY1}
+                      vlan:
+                        mode: trunk
+                        trunk-tags:
+                        - id-range:
+                            min: 2
+                            max: 4092
+            """
+        )
+    )
+    exec_cmd(f"ip link add {DUMMY0} type dummy".split(), check=True)
+    exec_cmd(f"nmcli device set {DUMMY0} managed no".split(), check=True)
+    exec_cmd(f"ip link set {DUMMY0} master {BRIDGE0}".split(), check=True)
+    exec_cmd(f"ip link set {DUMMY0} up".split(), check=True)
+    exec_cmd(
+        f"bridge vlan add vid 100 pvid egress untagged dev {DUMMY0}".split(),
+        check=True,
+    )
+    exec_cmd(f"bridge vlan del vid 1 dev {DUMMY0} egress".split(), check=True)
+    yield
+    libnmstate.apply(
+        load_yaml(
+            f"""---
+            interfaces:
+              - name: {DUMMY1}
+                type: dummy
+                state: absent
+              - name: {DUMMY0}
+                type: dummy
+                state: absent
+              - name: {BRIDGE0}
+                type: linux-bridge
+                state: absent
+            """
+        )
+    )
+
+
+# https://issues.redhat.com/browse/RHEL-21576
+@pytest.mark.tier1
+@pytest.mark.xfail(
+    nm_minor_version() <= 47,
+    raises=AssertionError,
+    reason="https://issues.redhat.com/browse/RHEL-21576",
+)
+def test_reapply_does_not_reset_unmanaged_port_pvid(
+    br0_with_pvid_and_unmanaged_port,
+):
+    libnmstate.apply(
+        load_yaml(
+            f"""---
+            interfaces:
+              - name: {BRIDGE0}
+                type: linux-bridge
+                state: up
+                mtu: 1508
+            """
+        )
+    )
+    br_state = show_only((BRIDGE0,))[Interface.KEY][0]
+
+    checked = False
+    for port in br_state[LB.CONFIG_SUBTREE][LB.PORT_SUBTREE]:
+        if port[LB.Port.NAME] == DUMMY0:
+            assert (
+                port[LB.Port.VLAN_SUBTREE][LB.Port.Vlan.MODE]
+                == LB.Port.Vlan.Mode.ACCESS
+            )
+            assert port[LB.Port.VLAN_SUBTREE][LB.Port.Vlan.TAG] == 100
+            checked = True
+
+    if not checked:
+        pytest.fail(f"Unmanaged bridge port {DUMMY0} not found: {br_state}")

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    BridgePortTunkTag, BridgePortVlanRange, ErrorKind, Interface,
+    BridgePortTrunkTag, BridgePortVlanRange, ErrorKind, Interface,
     InterfaceType, Interfaces, LinuxBridgeInterface,
     LinuxBridgeMulticastRouterType, MergedInterface, MergedInterfaces,
 };
@@ -9,7 +9,7 @@ use crate::{
 #[test]
 fn test_linux_bridge_ignore_port() {
     let des_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: eth1
   type: ethernet
   state: ignore
@@ -21,11 +21,11 @@ fn test_linux_bridge_ignore_port() {
   bridge:
     port:
     - name: eth2
-"#,
+",
     )
     .unwrap();
     let cur_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: eth1
   type: ethernet
   state: up
@@ -39,7 +39,7 @@ fn test_linux_bridge_ignore_port() {
     port:
     - name: eth1
     - name: eth2
-"#,
+",
     )
     .unwrap();
 
@@ -70,7 +70,7 @@ fn test_linux_bridge_ignore_port() {
 #[test]
 fn test_linux_bridge_verify_ignore_port() {
     let des_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: eth1
   type: ethernet
   state: ignore
@@ -82,11 +82,11 @@ fn test_linux_bridge_verify_ignore_port() {
   bridge:
     port:
     - name: eth2
-"#,
+",
     )
     .unwrap();
     let cur_ifaces: Interfaces = serde_yaml::from_str(
-        r#"---
+        r"---
 - name: eth1
   type: ethernet
   state: up
@@ -100,7 +100,7 @@ fn test_linux_bridge_verify_ignore_port() {
     port:
     - name: eth1
     - name: eth2
-"#,
+",
     )
     .unwrap();
 
@@ -170,11 +170,11 @@ bridge:
     assert_eq!(vlan_conf.tag, Some(102));
     assert_eq!(
         &vlan_conf.trunk_tags.as_ref().unwrap()[0],
-        &BridgePortTunkTag::Id(103)
+        &BridgePortTrunkTag::Id(103)
     );
     assert_eq!(
         &vlan_conf.trunk_tags.as_ref().unwrap()[1],
-        &BridgePortTunkTag::IdRange(BridgePortVlanRange {
+        &BridgePortTrunkTag::IdRange(BridgePortVlanRange {
             max: 1024,
             min: 105
         })
@@ -206,7 +206,7 @@ bridge:
 #[test]
 fn test_linux_bridge_partial_ignored() {
     let cur_ifaces = serde_yaml::from_str::<Interfaces>(
-        r#"---
+        r"---
 - name: eth1
   type: ethernet
   state: ignore
@@ -220,18 +220,18 @@ fn test_linux_bridge_partial_ignored() {
     port:
     - name: eth1
     - name: eth2
-"#,
+",
     )
     .unwrap();
     let des_ifaces = serde_yaml::from_str::<Interfaces>(
-        r#"---
+        r"---
 - name: br0
   type: linux-bridge
   state: up
 - name: eth1
   type: ethernet
   state: up
-"#,
+",
     )
     .unwrap();
     let merged_ifaces =
@@ -260,14 +260,14 @@ fn test_linux_bridge_partial_ignored() {
 #[test]
 fn test_linux_bridge_interger_multicast_router() {
     let iface: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"---
+        r"---
 name: br0
 type: linux-bridge
 state: up
 bridge:
   options:
     multicast-router: 0
-"#,
+",
     )
     .unwrap();
 
@@ -286,7 +286,7 @@ bridge:
 #[test]
 fn test_linux_bridge_ports() {
     let ifaces = serde_yaml::from_str::<Interfaces>(
-        r#"---
+        r"---
 - name: br0
   type: linux-bridge
   state: up
@@ -294,7 +294,7 @@ fn test_linux_bridge_ports() {
     ports:
     - name: eth1
     - name: eth2
-"#,
+",
     )
     .unwrap();
     assert_eq!(ifaces.to_vec()[0].ports(), Some(vec!["eth1", "eth2"]));
@@ -303,7 +303,7 @@ fn test_linux_bridge_ports() {
 #[test]
 fn test_linux_bridge_partially_disable_vlan_filtering() {
     let current = serde_yaml::from_str::<LinuxBridgeInterface>(
-        r#"---
+        r"---
 name: br0
 type: linux-bridge
 state: up
@@ -319,11 +319,11 @@ bridge:
         mode: trunk
         trunk-tags:
         - id: 500
-"#,
+",
     )
     .unwrap();
     let desired = serde_yaml::from_str::<LinuxBridgeInterface>(
-        r#"---
+        r"---
 name: br0
 type: linux-bridge
 state: up
@@ -332,7 +332,7 @@ bridge:
     - name: eth1
       vlan: {}
     - name: eth2
-"#,
+",
     )
     .unwrap();
 
@@ -341,7 +341,7 @@ bridge:
 
 #[test]
 fn test_linux_bridge_vlan_trunk_tags_yaml_serilize() {
-    let yml_content = r#"name: br0
+    let yml_content = r"name: br0
 type: linux-bridge
 state: up
 bridge:
@@ -360,7 +360,7 @@ bridge:
       mode: trunk
       trunk-tags:
       - id: 500
-"#;
+";
     let iface: LinuxBridgeInterface =
         serde_yaml::from_str(yml_content).unwrap();
 
@@ -399,7 +399,7 @@ bridge:
     .unwrap();
 
     let des_iface: Interface = serde_yaml::from_str(
-        r#"---
+        r"---
 name: br0
 type: linux-bridge
 state: up
@@ -407,7 +407,7 @@ bridge:
   port:
   - name: eth1
   - name: eth2
-"#,
+",
     )
     .unwrap();
 
@@ -424,7 +424,7 @@ bridge:
 #[test]
 fn test_bridge_vlan_filter_trunk_tag_without_enable_native() {
     let mut desired: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -444,11 +444,11 @@ fn test_bridge_vlan_filter_trunk_tag_without_enable_native() {
                   - id-range:
                       max: 500
                       min: 400
-        "#,
+        ",
     )
     .unwrap();
 
-    let result = desired.sanitize();
+    let result = desired.sanitize(true);
 
     assert!(result.is_err());
     if let Err(e) = result {
@@ -459,7 +459,7 @@ fn test_bridge_vlan_filter_trunk_tag_without_enable_native() {
 #[test]
 fn test_bridge_vlan_filter_trunk_tag_overlap_id_vs_range() {
     let mut desired: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -476,11 +476,11 @@ fn test_bridge_vlan_filter_trunk_tag_overlap_id_vs_range() {
                       min: 600
                       max: 900
                   - id: 600
-        "#,
+        ",
     )
     .unwrap();
 
-    let result = desired.sanitize();
+    let result = desired.sanitize(true);
 
     assert!(result.is_err());
     if let Err(e) = result {
@@ -491,7 +491,7 @@ fn test_bridge_vlan_filter_trunk_tag_overlap_id_vs_range() {
 #[test]
 fn test_bridge_vlan_filter_trunk_tag_overlap_range_vs_range() {
     let mut desired: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -510,11 +510,11 @@ fn test_bridge_vlan_filter_trunk_tag_overlap_range_vs_range() {
                   - id-range:
                       min: 900
                       max: 1000
-        "#,
+        ",
     )
     .unwrap();
 
-    let result = desired.sanitize();
+    let result = desired.sanitize(true);
 
     assert!(result.is_err());
     if let Err(e) = result {
@@ -525,7 +525,7 @@ fn test_bridge_vlan_filter_trunk_tag_overlap_range_vs_range() {
 #[test]
 fn test_bridge_vlan_filter_trunk_tag_overlap_id_vs_id() {
     let mut desired: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -540,11 +540,11 @@ fn test_bridge_vlan_filter_trunk_tag_overlap_id_vs_id() {
                 trunk-tags:
                   - id: 100
                   - id: 100
-        "#,
+        ",
     )
     .unwrap();
 
-    let result = desired.sanitize();
+    let result = desired.sanitize(true);
 
     assert!(result.is_err());
     if let Err(e) = result {
@@ -555,7 +555,7 @@ fn test_bridge_vlan_filter_trunk_tag_overlap_id_vs_id() {
 #[test]
 fn test_bridge_vlan_filter_enable_native_with_access_mode() {
     let mut desired: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -568,11 +568,11 @@ fn test_bridge_vlan_filter_enable_native_with_access_mode() {
               vlan:
                 enable-native: true
                 mode: access
-        "#,
+        ",
     )
     .unwrap();
 
-    let result = desired.sanitize();
+    let result = desired.sanitize(true);
 
     assert!(result.is_err());
     if let Err(e) = result {
@@ -583,7 +583,7 @@ fn test_bridge_vlan_filter_enable_native_with_access_mode() {
 #[test]
 fn test_bridge_vlan_filter_trunk_tags_with_access_mode() {
     let mut desired: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -597,11 +597,11 @@ fn test_bridge_vlan_filter_trunk_tags_with_access_mode() {
                 mode: access
                 trunk-tags:
                   - id: 100
-        "#,
+        ",
     )
     .unwrap();
 
-    let result = desired.sanitize();
+    let result = desired.sanitize(true);
 
     assert!(result.is_err());
     if let Err(e) = result {
@@ -612,7 +612,7 @@ fn test_bridge_vlan_filter_trunk_tags_with_access_mode() {
 #[test]
 fn test_bridge_vlan_filter_no_trunk_tags_with_trunk_mode() {
     let mut desired: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -624,11 +624,11 @@ fn test_bridge_vlan_filter_no_trunk_tags_with_trunk_mode() {
             - name: eth1
               vlan:
                 mode: trunk
-        "#,
+        ",
     )
     .unwrap();
 
-    let result = desired.sanitize();
+    let result = desired.sanitize(true);
 
     assert!(result.is_err());
     if let Err(e) = result {
@@ -639,7 +639,7 @@ fn test_bridge_vlan_filter_no_trunk_tags_with_trunk_mode() {
 #[test]
 fn test_bridge_validate_diff_group_forward_mask_and_group_fwd_mask() {
     let mut desired: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -647,10 +647,10 @@ fn test_bridge_validate_diff_group_forward_mask_and_group_fwd_mask() {
           options:
             group-forward-mask: 1
             group-fwd-mask: 2
-        "#,
+        ",
     )
     .unwrap();
-    let result = desired.sanitize();
+    let result = desired.sanitize(true);
 
     assert!(result.is_err());
     if let Err(e) = result {
@@ -664,7 +664,7 @@ fn test_bridge_validate_diff_group_forward_mask_and_group_fwd_mask() {
 #[test]
 fn test_bridge_sanitize_group_forward_mask_and_group_fwd_mask() {
     let mut desired_both: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
@@ -672,50 +672,83 @@ fn test_bridge_sanitize_group_forward_mask_and_group_fwd_mask() {
           options:
             group-forward-mask: 1
             group-fwd-mask: 1
-        "#,
+        ",
     )
     .unwrap();
-    desired_both.sanitize().unwrap();
+    desired_both.sanitize(true).unwrap();
 
     let mut desired_old: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
         bridge:
           options:
             group-forward-mask: 1
-        "#,
+        ",
     )
     .unwrap();
-    desired_old.sanitize().unwrap();
+    desired_old.sanitize(true).unwrap();
 
     let mut desired_new: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
         bridge:
           options:
             group-fwd-mask: 1
-        "#,
+        ",
     )
     .unwrap();
-    desired_new.sanitize().unwrap();
+    desired_new.sanitize(true).unwrap();
 
     let expected: LinuxBridgeInterface = serde_yaml::from_str(
-        r#"
+        r"
         name: br0
         type: linux-bridge
         state: up
         bridge:
           options:
             group-fwd-mask: 1
-        "#,
+        ",
     )
     .unwrap();
 
     assert_eq!(desired_both, expected);
     assert_eq!(desired_old, expected);
     assert_eq!(desired_new, expected);
+}
+
+#[test]
+fn test_linux_bridge_is_default_pvid_changed() {
+    let des_iface: Interface = serde_yaml::from_str(
+        r"---
+          name: br0
+          type: linux-bridge
+          state: up
+          bridge:
+            port:
+            - name: eth2
+            - name: eth1",
+    )
+    .unwrap();
+    let cur_iface: Interface = serde_yaml::from_str(
+        r"---
+          name: br0
+          type: linux-bridge
+          state: up
+          bridge:
+            port:
+            - name: eth1
+            - name: eth2
+            options:
+              vlan-default-pvid: 1",
+    )
+    .unwrap();
+
+    let merged_iface =
+        MergedInterface::new(Some(des_iface), Some(cur_iface)).unwrap();
+
+    assert!(!merged_iface.is_default_pvid_changed())
 }

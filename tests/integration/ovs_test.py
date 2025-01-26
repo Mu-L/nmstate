@@ -6,7 +6,6 @@ import pytest
 import yaml
 
 import libnmstate
-from libnmstate.prettystate import PrettyState
 from libnmstate.schema import Interface
 from libnmstate.schema import InterfaceIP
 from libnmstate.schema import InterfaceIPv4
@@ -18,12 +17,12 @@ from libnmstate.schema import MacVtap
 from libnmstate.schema import OVSBridge
 from libnmstate.schema import OVSInterface
 from libnmstate.schema import OvsDB
+from libnmstate.schema import Ovn
 from libnmstate.schema import RouteRule
 from libnmstate.schema import VLAN
 from libnmstate.schema import VXLAN
 from libnmstate.schema import Veth
 from libnmstate.error import NmstateDependencyError
-from libnmstate.error import NmstateNotSupportedError
 from libnmstate.error import NmstateValueError
 
 from .testlib import assertlib
@@ -33,7 +32,6 @@ from .testlib import statelib
 from .testlib.bondlib import bond_interface
 from .testlib.bridgelib import linux_bridge
 from .testlib.env import is_k8s
-from .testlib.env import nm_major_minor_version
 from .testlib.env import nm_minor_version
 from .testlib.genconf import gen_conf_apply
 from .testlib.nmplugin import disable_nm_plugin
@@ -42,6 +40,7 @@ from .testlib.retry import retry_till_true_or_timeout
 from .testlib.servicelib import disable_service
 from .testlib.statelib import state_match
 from .testlib.vlan import vlan_interface
+from .testlib.iproutelib import ip_monitor_assert_stable_link_up
 
 
 BOND1 = "bond1"
@@ -73,8 +72,14 @@ OVS_BOND_YAML_STATE = f"""
 """
 
 RC_SUCCESS = 0
-TEST_EXTERNAL_IDS_KEY = "ovn-bridge-mappings"
-TEST_EXTERNAL_IDS_VALUE = "provider:br-provider"
+TEST_OVN_MAPPINGS_BRIDGE = "br-provider"
+TEST_OVN_MAPPINGS_PHYSNET = "provider"
+TEST_EXTERNAL_IDS_KEY = "akey"
+TEST_EXTERNAL_IDS_VALUE = "aval"
+TEST_EXTERNAL_IDS_MAPPING_KEY = "ovn-bridge-mappings"
+TEST_EXTERNAL_IDS_MAPPING_VALUE = (
+    f"{TEST_OVN_MAPPINGS_PHYSNET}:{TEST_OVN_MAPPINGS_BRIDGE}"
+)
 TEST_OTHER_CONFIG_KEY = "stats-update-interval"
 TEST_OTHER_CONFIG_VALUE = "1000"
 RETRY_TIMEOUT = 15
@@ -129,7 +134,9 @@ def test_create_and_remove_ovs_bridge_options_specified():
             OVSBridge.Options.FAIL_MODE: "",
             OVSBridge.Options.MCAST_SNOOPING_ENABLED: False,
             OVSBridge.Options.RSTP: False,
-            OVSBridge.Options.STP: True,
+            OVSBridge.STP_SUBTREE: {
+                OVSBridge.STP.ENABLED: True,
+            },
         }
     )
 
@@ -204,6 +211,42 @@ def ovs_bridge1_with_internal_port_same_name():
 
     with bridge.create() as state:
         yield state
+
+
+@pytest.mark.tier1
+def test_create_and_modify_ovs_bridge1_with_internal_port_same_name(
+    ovs_bridge1_with_internal_port_same_name,
+):
+    desired_state = {
+        Interface.KEY: [
+            {
+                Interface.NAME: BRIDGE1,
+                Interface.TYPE: InterfaceType.OVS_INTERFACE,
+                Interface.IPV4: {
+                    InterfaceIPv4.ENABLED: True,
+                    InterfaceIPv4.ADDRESS: [
+                        {
+                            InterfaceIPv4.ADDRESS_IP: "192.0.2.1",
+                            InterfaceIPv4.ADDRESS_PREFIX_LENGTH: 24,
+                        }
+                    ],
+                },
+            },
+            {
+                Interface.NAME: BRIDGE1,
+                Interface.TYPE: InterfaceType.OVS_BRIDGE,
+                Interface.STATE: InterfaceState.UP,
+                OVSBridge.CONFIG_SUBTREE: {
+                    OVSBridge.PORT_SUBTREE: [
+                        {
+                            OVSBridge.Port.NAME: BRIDGE1,
+                        },
+                    ]
+                },
+            },
+        ]
+    }
+    libnmstate.apply(desired_state)
 
 
 @pytest.mark.tier1
@@ -304,19 +347,6 @@ class TestOvsLinkAggregation:
 
         assertlib.assert_absent(BRIDGE1)
         assertlib.assert_absent(BOND1)
-
-    def test_pretty_state_ovs_lag_name_first(self, eth1_up, eth2_up):
-        bridge = Bridge(BRIDGE1)
-        bridge.add_link_aggregation_port(
-            BOND1,
-            (ETH1, ETH2),
-            mode=OVSBridge.Port.LinkAggregation.Mode.ACTIVE_BACKUP,
-        )
-
-        with bridge.create():
-            current_state = statelib.show_only((BRIDGE1,))
-            pretty_state = PrettyState(current_state)
-            assert OVS_BOND_YAML_STATE in pretty_state.yaml
 
     @pytest.mark.tier1
     def test_add_ovs_lag_to_existing_ovs_bridge(self, port0_up, port1_up):
@@ -638,6 +668,193 @@ def test_remove_all_ovsdb_global_config():
     }
 
 
+def test_ovsdb_global_config_add_delete_mapping():
+    desired_ovs_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net1",
+                Ovn.BridgeMappings.BRIDGE: "br1",
+                Ovn.BridgeMappings.STATE: "present",
+            },
+        ]
+    }
+    libnmstate.apply({Ovn.KEY: desired_ovs_config})
+    current_ovs_config = libnmstate.show()[Ovn.KEY]
+
+    remove_ovn_state_present(desired_ovs_config)
+    assert state_match(desired_ovs_config, current_ovs_config)
+
+    desired_ovs_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net1",
+                Ovn.BridgeMappings.BRIDGE: "br1",
+                Ovn.BridgeMappings.STATE: "absent",
+            },
+        ]
+    }
+    libnmstate.apply({Ovn.KEY: desired_ovs_config})
+    assert Ovn.OVN_SUBTREE not in libnmstate.show()
+
+
+@pytest.fixture
+def ovn_bridge_mapping_net1():
+    ovn_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net1",
+                Ovn.BridgeMappings.BRIDGE: "br1",
+            },
+        ]
+    }
+    libnmstate.apply({Ovn.KEY: ovn_config})
+    yield ovn_config
+    libnmstate.apply(
+        {
+            Ovn.KEY: {
+                Ovn.BRIDGE_MAPPINGS: [
+                    {
+                        Ovn.BridgeMappings.LOCALNET: "net1",
+                        Ovn.BridgeMappings.STATE: "absent",
+                    },
+                ]
+            }
+        }
+    )
+
+
+@pytest.fixture
+def ovn_bridge_mapping_net2():
+    ovn_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net2",
+                Ovn.BridgeMappings.BRIDGE: "br2",
+                Ovn.BridgeMappings.STATE: "present",
+            },
+        ]
+    }
+    libnmstate.apply({Ovn.KEY: ovn_config})
+    yield ovn_config
+    libnmstate.apply(
+        {
+            Ovn.KEY: {
+                Ovn.BRIDGE_MAPPINGS: [
+                    {
+                        Ovn.BridgeMappings.LOCALNET: "net1",
+                        Ovn.BridgeMappings.STATE: "absent",
+                    },
+                ]
+            }
+        }
+    )
+
+
+def test_ovn_global_config_add_delete_single_mapping(ovn_bridge_mapping_net1):
+    desired_ovs_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net123",
+                Ovn.BridgeMappings.BRIDGE: "br321",
+                Ovn.BridgeMappings.STATE: "present",
+            },
+        ]
+    }
+    libnmstate.apply({Ovn.KEY: desired_ovs_config})
+    current_ovs_config = libnmstate.show()[Ovn.KEY]
+
+    desired_ovs_config[Ovn.BRIDGE_MAPPINGS] += ovn_bridge_mapping_net1[
+        Ovn.BRIDGE_MAPPINGS
+    ]
+    desired_ovs_config[Ovn.BRIDGE_MAPPINGS] = sorted(
+        desired_ovs_config[Ovn.BRIDGE_MAPPINGS],
+        key=lambda mapping: mapping[Ovn.BridgeMappings.LOCALNET],
+    )
+    remove_ovn_state_present(desired_ovs_config)
+    assert state_match(
+        desired_ovs_config,
+        current_ovs_config,
+    )
+
+    desired_ovs_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net123",
+                Ovn.BridgeMappings.STATE: "absent",
+            },
+        ]
+    }
+    libnmstate.apply({Ovn.KEY: desired_ovs_config})
+    assert libnmstate.show()[Ovn.KEY] == ovn_bridge_mapping_net1
+
+
+def test_ovn_global_config_modify_and_delete_mappings(
+    ovn_bridge_mapping_net1, ovn_bridge_mapping_net2
+):
+    desired_ovs_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net1",
+                Ovn.BridgeMappings.BRIDGE: "br321",
+            },
+            {
+                Ovn.BridgeMappings.LOCALNET: "net2",
+                Ovn.BridgeMappings.STATE: "absent",
+            },
+        ]
+    }
+    libnmstate.apply({Ovn.KEY: desired_ovs_config})
+    current_ovs_config = libnmstate.show()[Ovn.KEY]
+    desired_ovs_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net1",
+                Ovn.BridgeMappings.BRIDGE: "br321",
+            },
+        ]
+    }
+    assert state_match(desired_ovs_config, current_ovs_config)
+
+
+def test_ovsdb_global_config_cannot_use_ovn_bridge_mappings_external_id():
+    desired_ovs_config = {
+        OvsDB.EXTERNAL_IDS: {
+            TEST_EXTERNAL_IDS_MAPPING_KEY: TEST_EXTERNAL_IDS_MAPPING_VALUE,
+        }
+    }
+    with pytest.raises(NmstateValueError):
+        libnmstate.apply({OvsDB.KEY: desired_ovs_config})
+
+
+def test_ovsdb_global_config_clearing_ext_ids_preserves_existing_mappings(
+    ovn_bridge_mapping_net1,
+):
+    desired_ovs_config = {
+        OvsDB.EXTERNAL_IDS: {},
+    }
+    libnmstate.apply({OvsDB.KEY: desired_ovs_config})
+    current_ovs_config = libnmstate.show()[Ovn.KEY]
+
+    assert current_ovs_config == ovn_bridge_mapping_net1
+
+
+def test_ovn_bridge_mappings_cannot_have_duplicate_localnet_keys():
+    desired_ovs_config = {
+        Ovn.BRIDGE_MAPPINGS: [
+            {
+                Ovn.BridgeMappings.LOCALNET: "net1",
+                Ovn.BridgeMappings.BRIDGE: "br321",
+            },
+            {
+                Ovn.BridgeMappings.LOCALNET: "net1",
+                Ovn.BridgeMappings.STATE: "absent",
+            },
+        ]
+    }
+    with pytest.raises(NmstateValueError):
+        libnmstate.apply({Ovn.KEY: desired_ovs_config})
+
+
 @pytest.fixture
 def ovsdb_global_config_external_ids():
     ovs_config = {
@@ -648,6 +865,21 @@ def ovsdb_global_config_external_ids():
     libnmstate.apply(
         {OvsDB.KEY: {OvsDB.EXTERNAL_IDS: {TEST_EXTERNAL_IDS_KEY: None}}}
     )
+
+
+def test_mappings_update_does_not_clear_other_ext_ids(
+    ovsdb_global_config_external_ids,
+    ovn_bridge_mapping_net1,
+):
+    current_ovs_config = libnmstate.show()[OvsDB.KEY]
+    assert current_ovs_config.pop(OvsDB.OTHER_CONFIG) == {}
+    assert (
+        ovsdb_global_config_external_ids[OvsDB.EXTERNAL_IDS].items()
+        <= current_ovs_config[OvsDB.EXTERNAL_IDS].items()
+    )
+
+    current_ovn_config = libnmstate.show()[Ovn.KEY]
+    assert current_ovn_config == ovn_bridge_mapping_net1
 
 
 def test_ovsdb_global_config_untouched_if_not_defined(
@@ -773,13 +1005,17 @@ class TestOvsPatch:
                     {
                         Interface.NAME: PATCH0,
                         OvsDB.KEY: {
-                            "foo": "abc",
+                            OvsDB.EXTERNAL_IDS: {
+                                "foo": "abc",
+                            }
                         },
                     },
                     {
                         Interface.NAME: PATCH1,
                         OvsDB.KEY: {
-                            "foo": "abd",
+                            OvsDB.EXTERNAL_IDS: {
+                                "foo": "abd",
+                            }
                         },
                     },
                 ]
@@ -840,23 +1076,19 @@ def test_create_memory_only_ovs_bridge():
     bridge = Bridge(BRIDGE1)
     bridge.add_internal_port(PORT1)
 
-    if nm_major_minor_version() <= 1.28:
-        with pytest.raises(NmstateNotSupportedError):
-            libnmstate.apply(bridge.state, save_to_disk=False)
-    else:
-        try:
-            libnmstate.apply(bridge.state, save_to_disk=False)
-        finally:
-            libnmstate.apply(
-                {
-                    Interface.KEY: [
-                        {
-                            Interface.NAME: BRIDGE1,
-                            Interface.STATE: InterfaceState.ABSENT,
-                        }
-                    ]
-                }
-            )
+    try:
+        libnmstate.apply(bridge.state, save_to_disk=False)
+    finally:
+        libnmstate.apply(
+            {
+                Interface.KEY: [
+                    {
+                        Interface.NAME: BRIDGE1,
+                        Interface.STATE: InterfaceState.ABSENT,
+                    }
+                ]
+            }
+        )
 
 
 def test_remove_all_ovs_ports(bridge_with_ports):
@@ -1033,7 +1265,7 @@ def test_set_static_to_ovs_interface_with_the_same_name_bridge(
             }
         ]
 
-    retry_till_true_or_timeout(RETRY_TIMEOUT, _ovs_iface_got_ip)
+    assert retry_till_true_or_timeout(RETRY_TIMEOUT, _ovs_iface_got_ip)
 
 
 @pytest.fixture
@@ -1066,15 +1298,7 @@ def test_add_route_rule_to_ovs_interface_dhcp_auto_route_table(
     desired_state = {RouteRule.KEY: {RouteRule.CONFIG: [route_rule]}}
     libnmstate.apply(desired_state)
 
-    iprule.ip_rule_exist_in_os(
-        route_rule.get(RouteRule.IP_FROM),
-        route_rule.get(RouteRule.IP_TO),
-        route_rule.get(RouteRule.PRIORITY),
-        route_rule.get(RouteRule.ROUTE_TABLE),
-        route_rule.get(RouteRule.FWMARK),
-        route_rule.get(RouteRule.FWMASK),
-        route_rule.get(RouteRule.FAMILY),
-    )
+    iprule.ip_rule_exist_in_os(route_rule)
 
 
 @pytest.fixture
@@ -1119,7 +1343,8 @@ def test_attach_linux_bond_to_ovs_bridge(
             state: up
             bridge:
               options:
-                stp: false
+                stp:
+                  enabled: false
               port:
                 - name: bond1
             """,
@@ -1870,3 +2095,134 @@ def test_ovs_replace_internal_iface_to_bridge_with_auto_create_iface(
     )
     libnmstate.apply(desired_state)
     assertlib.assert_state_match(desired_state)
+
+
+# OVS netdev datapath will use TUN interface for OVS internal interface
+@pytest.mark.tier1
+def test_netdev_data_path(eth1_up):
+    bridge = Bridge(BRIDGE1)
+    bridge.add_system_port("eth1")
+    bridge.set_options({OVSBridge.Options.DATAPATH: "netdev"})
+    bridge.add_internal_port(
+        PORT1,
+        ipv4_state={
+            InterfaceIPv4.ENABLED: True,
+            InterfaceIPv4.DHCP: False,
+            InterfaceIPv4.ADDRESS: [
+                {
+                    InterfaceIPv4.ADDRESS_IP: "192.0.2.1",
+                    InterfaceIPv4.ADDRESS_PREFIX_LENGTH: 24,
+                }
+            ],
+        },
+    )
+    desired_state = bridge.state
+    try:
+        libnmstate.apply(desired_state)
+        assertlib.assert_state_match(desired_state)
+    finally:
+        for iface in desired_state[Interface.KEY]:
+            iface[Interface.STATE] = InterfaceState.ABSENT
+        libnmstate.apply(desired_state)
+    assertlib.assert_absent(BRIDGE0)
+    assertlib.assert_absent(PORT1)
+
+
+@pytest.mark.tier1
+def test_allow_extra_ovs_patch_ports(ovs_bridge_with_patch_ports):
+    bridge = Bridge(BRIDGE1)
+    bridge.add_system_port("eth1")
+    desired_state = bridge.state
+    desired_state[Interface.KEY][0][OVSBridge.CONFIG_SUBTREE][
+        OVSBridge.ALLOW_EXTRA_PATCH_PORTS
+    ] = True
+    libnmstate.apply(desired_state)
+
+    patch1_state = statelib.show_only((PATCH1,))
+
+    assert patch1_state[Interface.KEY][0][Interface.CONTROLLER] == BRIDGE1
+
+
+@pytest.fixture
+def ovs_bridge_with_geneve(bridge_with_ports):
+    cmdlib.exec_cmd(
+        "ovs-vsctl add-port br1 gen0 -- set interface gen0 type=geneve "
+        "options:remote_ip=192.0.2.1 options:key=123".split(),
+        check=True,
+    )
+    yield
+    cmdlib.exec_cmd(
+        "ovs-vsctl del-port br1 gen0".split(),
+        check=True,
+    )
+
+
+@pytest.mark.tier1
+def test_ignore_ovs_geneve_iface(ovs_bridge_with_geneve):
+    cur_state = statelib.show_only(("genev_sys_6081",))
+    assert (
+        cur_state[Interface.KEY][0][Interface.STATE] == InterfaceState.IGNORE
+    )
+
+
+def test_raise_error_on_unknown_ovsdb_iface_section(bridge_with_ports):
+    with pytest.raises(NmstateValueError):
+        libnmstate.apply(
+            {
+                Interface.KEY: [
+                    {
+                        Interface.NAME: PORT1,
+                        OvsDB.KEY: {
+                            "foo": "abc",
+                            "bar": "abd",
+                        },
+                    },
+                ]
+            }
+        )
+
+
+def test_raise_error_on_unknown_ovsdb_global_section():
+    with pytest.raises(NmstateValueError):
+        libnmstate.apply(
+            {
+                OvsDB.KEY: {
+                    "foo": "abc",
+                    "bar": "abd",
+                },
+            }
+        )
+
+
+def remove_ovn_state_present(state):
+    for ovn_map in state.get(Ovn.BRIDGE_MAPPINGS, []):
+        ovn_map.pop(Ovn.BridgeMappings.STATE, None)
+
+
+@pytest.mark.tier1
+@ip_monitor_assert_stable_link_up(BRIDGE1)
+def test_ovs_internal_iface_link_stable(
+    ovs_bridge1_with_internal_port_same_name,
+):
+    desired_state = ovs_bridge1_with_internal_port_same_name
+    libnmstate.apply(desired_state)
+
+
+@pytest.fixture
+def ovs_bridge1_with_bond_as_system_iface(eth1_up, eth2_up):
+    with bond_interface(BOND1, ["eth1"]):
+        bridge = Bridge(BRIDGE1)
+        bridge.add_system_port(BOND1)
+        bridge.add_internal_port(
+            BRIDGE1, ipv4_state={InterfaceIPv4.ENABLED: False}
+        )
+        with bridge.create() as state:
+            yield state
+
+
+@pytest.mark.tier1
+@ip_monitor_assert_stable_link_up(BRIDGE1)
+@ip_monitor_assert_stable_link_up(BOND1)
+def test_ovs_system_iface_link_stable(ovs_bridge1_with_bond_as_system_iface):
+    desired_state = ovs_bridge1_with_bond_as_system_iface
+    libnmstate.apply(desired_state)

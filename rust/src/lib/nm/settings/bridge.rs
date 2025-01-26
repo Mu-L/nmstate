@@ -5,7 +5,7 @@ use crate::nm::nm_dbus::{
 };
 
 use crate::{
-    BridgePortTunkTag, BridgePortVlanConfig, BridgePortVlanMode, Interface,
+    BridgePortTrunkTag, BridgePortVlanConfig, BridgePortVlanMode, Interface,
     LinuxBridgeInterface, LinuxBridgeOptions, LinuxBridgeStpOptions,
     MergedInterface, VlanProtocol,
 };
@@ -97,6 +97,9 @@ fn apply_br_options(
             VlanProtocol::Ieee8021Ad => Some(NmVlanProtocol::Dot1Ad),
         }
     }
+    if let Some(v) = br_opts.vlan_default_pvid.as_ref() {
+        nm_br_set.vlan_default_pvid = Some((*v).into());
+    }
 
     if let Some(stp_opts) = br_opts.stp.as_ref() {
         apply_stp_setting(nm_br_set, stp_opts);
@@ -183,7 +186,7 @@ fn nmstate_port_vlans_to_nm_vlan_range(
 }
 
 fn trunk_tag_to_nm_vlan_range(
-    trunk_tag: &BridgePortTunkTag,
+    trunk_tag: &BridgePortTrunkTag,
 ) -> NmSettingBridgeVlanRange {
     let mut ret = NmSettingBridgeVlanRange::default();
     let (vid_min, vid_max) = trunk_tag.get_vlan_tag_range();

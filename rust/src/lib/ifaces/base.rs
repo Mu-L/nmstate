@@ -3,44 +3,57 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ErrorKind, EthtoolConfig, Ieee8021XConfig, InterfaceIpv4, InterfaceIpv6,
-    InterfaceState, InterfaceType, LldpConfig, MergedInterface, MptcpConfig,
-    NmstateError, OvsDbIfaceConfig, RouteEntry, WaitIp,
+    DispatchConfig, ErrorKind, EthtoolConfig, Ieee8021XConfig,
+    InterfaceIdentifier, InterfaceIpv4, InterfaceIpv6, InterfaceState,
+    InterfaceType, LldpConfig, MergedInterface, MptcpConfig, NmstateError,
+    OvsDbIfaceConfig, RouteEntry, WaitIp,
 };
 
 const MINIMUM_IPV6_MTU: u64 = 1280;
 
-// TODO: Use prop_list to Serialize like InterfaceIpv4 did
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 #[non_exhaustive]
 /// Information shared among all interface types
 pub struct BaseInterface {
-    /// Interface name
+    /// Interface name, when applying with `InterfaceIdentifier::MacAddress`,
+    /// if `profile_name` not defined, this will be used as profile name.
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
     #[serde(skip_serializing_if = "crate::serializer::is_option_string_empty")]
     /// Interface description stored in network backend. Not available for
     /// kernel only mode.
     pub description: Option<String>,
-    #[serde(skip)]
-    /// TODO: internal use only. Hide this.
-    pub prop_list: Vec<&'static str>,
     #[serde(rename = "type", default = "default_iface_type")]
     /// Interface type. Serialize and deserialize to/from `type`
     pub iface_type: InterfaceType,
+    #[serde(skip_serializing_if = "crate::serializer::is_option_string_empty")]
+    /// The driver of the specified network device.
+    pub driver: Option<String>,
     #[serde(default = "default_state")]
     /// Interface state. Default to [InterfaceState::Up] when applying.
     pub state: InterfaceState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Define network backend matching method on choosing network interface.
+    /// Default to [InterfaceIdentifier::Name].
+    pub identifier: Option<InterfaceIdentifier>,
+    /// When applying with `[InterfaceIdentifier::MacAddress]`,
+    /// nmstate will store original desired interface name as `profile_name`
+    /// here and store the real interface name as `name` property.
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// For [InterfaceIdentifier::Name] (default), this property will change
+    /// the interface MAC address to desired one when applying.
+    /// For [InterfaceIdentifier::MacAddress], this property will be used
+    /// for searching interface on desired MAC address when applying.
     /// MAC address in the format: upper case hex string separated by `:` on
     /// every two characters. Case insensitive when applying.
     /// Serialize and deserialize to/from `mac-address`.
     pub mac_address: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     /// MAC address never change after reboots(normally stored in firmware of
     /// network interface). Using the same format as `mac_address` property.
     /// Ignored during apply.
-    /// TODO: expose it and we do not special merge for this.
     pub permanent_mac_address: Option<String>,
     #[serde(
         skip_serializing_if = "Option::is_none",
@@ -93,7 +106,7 @@ pub struct BaseInterface {
     /// accept all packages, also known as promiscuous mode.
     /// Serialize and deserialize to/from `accpet-all-mac-addresses`.
     pub accept_all_mac_addresses: Option<bool>,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     /// Copy the MAC address from specified interface.
     /// Ignored during serializing.
     /// Deserialize from `copy-mac-from`.
@@ -111,8 +124,10 @@ pub struct BaseInterface {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Ethtool configurations
     pub ethtool: Option<EthtoolConfig>,
+    /// Dispatch script configurations
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch: Option<DispatchConfig>,
     #[serde(skip)]
-    /// TODO: internal use, hide it.
     pub controller_type: Option<InterfaceType>,
     // The interface lowest up_priority will be activated first.
     // The up_priority should be its controller's up_priority
@@ -147,9 +162,10 @@ impl BaseInterface {
             }
         }
         if self.permanent_mac_address.is_none() {
-            self.permanent_mac_address = current.permanent_mac_address.clone();
+            self.permanent_mac_address
+                .clone_from(&current.permanent_mac_address);
         }
-        self.copy_mac_from = desired.copy_mac_from.clone();
+        self.copy_mac_from.clone_from(&desired.copy_mac_from);
     }
 
     fn has_controller(&self) -> bool {
@@ -206,7 +222,10 @@ impl BaseInterface {
         self.ipv6.as_ref().map(|i| i.enabled) == Some(true)
     }
 
-    pub(crate) fn sanitize(&mut self) -> Result<(), NmstateError> {
+    pub(crate) fn sanitize(
+        &mut self,
+        is_desired: bool,
+    ) -> Result<(), NmstateError> {
         if let Some(mac) = self.mac_address.as_mut() {
             mac.make_ascii_uppercase();
         }
@@ -215,12 +234,13 @@ impl BaseInterface {
         self.max_mtu = None;
         self.min_mtu = None;
         self.copy_mac_from = None;
+        self.driver = None;
 
         if let Some(ipv4_conf) = self.ipv4.as_mut() {
-            ipv4_conf.sanitize()?;
+            ipv4_conf.sanitize(is_desired)?;
         }
         if let Some(ipv6_conf) = self.ipv6.as_mut() {
-            ipv6_conf.sanitize()?;
+            ipv6_conf.sanitize(is_desired)?;
             if ipv6_conf.enabled {
                 if let Some(mtu) = self.mtu {
                     if mtu < MINIMUM_IPV6_MTU {
@@ -244,26 +264,28 @@ impl BaseInterface {
         if !self.can_have_ip() {
             self.wait_ip = None;
         }
-        Ok(())
-    }
 
-    pub(crate) fn sanitize_for_verify(&mut self) {
-        if self.controller.as_deref() == Some("") {
-            self.controller = None;
+        if is_desired
+            && self.iface_type.is_userspace()
+            && self.dispatch.is_some()
+        {
+            return Err(NmstateError::new(
+                ErrorKind::InvalidArgument,
+                format!(
+                    "User space interface {}/{} is not allow to hold \
+                    dispatch configurations",
+                    self.name.as_str(),
+                    self.iface_type,
+                ),
+            ));
         }
-        if let Some(mptcp_conf) = self.mptcp.as_mut() {
-            mptcp_conf.sanitize_for_verify();
+
+        // Remove permanent_mac_address in desired state as it is query only
+        if is_desired {
+            self.permanent_mac_address = None;
         }
-        if let Some(ipv4_conf) = self.ipv4.as_mut() {
-            ipv4_conf.sanitize_for_verify();
-        }
-        if let Some(ipv6_conf) = self.ipv6.as_mut() {
-            ipv6_conf.sanitize_for_verify();
-        }
-        // ovsdb None equal to empty
-        if self.ovsdb.is_none() {
-            self.ovsdb = Some(OvsDbIfaceConfig::empty());
-        }
+
+        Ok(())
     }
 }
 

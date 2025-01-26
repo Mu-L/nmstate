@@ -6,6 +6,8 @@ use crate::nm::nm_dbus::{NmConnection, NmSettingBond};
 
 use crate::{BondConfig, BondInterface, BondOptions};
 
+const DEFAULT_ARP_MISSED_MAX: u8 = 2;
+
 #[cfg(feature = "query_apply")]
 pub(crate) fn get_bond_balance_slb(nm_conn: &NmConnection) -> Option<bool> {
     if let Some(nm_bond_setting) = nm_conn.bond.as_ref() {
@@ -199,7 +201,58 @@ fn apply_bond_options(
             if *v { "1".to_string() } else { "0".to_string() },
         );
     }
+    if let Some(v) = bond_opts.arp_missed_max.as_ref() {
+        // The `arp_missed_max` is only supported by NM 1.42+, when using
+        // default value, we do not set it in NM configure in case user are
+        // applying whatever they got from `NetworkState::retrieve()`.
+        if nm_bond_set.options.contains_key("arp_missed_max")
+            || *v != DEFAULT_ARP_MISSED_MAX
+        {
+            nm_bond_set
+                .options
+                .insert("arp_missed_max".to_string(), v.to_string());
+        }
+    }
 
     // Remove all empty string option
     nm_bond_set.options.retain(|_, v| !v.is_empty());
+}
+
+pub(crate) fn gen_nm_bond_port_setting(
+    bond_iface: &BondInterface,
+    nm_conn: &mut NmConnection,
+) {
+    let mut nm_set = nm_conn.bond_port.as_ref().cloned().unwrap_or_default();
+    let bond_port_conf = if let Some(i) = nm_conn
+        .iface_name()
+        .and_then(|iface_name| bond_iface.get_port_conf(iface_name))
+    {
+        i
+    } else {
+        return;
+    };
+
+    // NetworkManager 1.34- does not support bond_port yet, we skip creating
+    // this NmSettingBondPort on default value unless it pre-exist.
+    if (bond_port_conf.priority.is_none() || bond_port_conf.priority == Some(0))
+        && (bond_port_conf.queue_id.is_none()
+            || bond_port_conf.queue_id == Some(0))
+        && nm_conn.bond_port.is_none()
+    {
+        return;
+    }
+
+    // NetworkManager 1.42.8- does not support priority, hence we do not touch
+    // it unless non-default defined or pre-exist.
+    if let Some(v) = bond_port_conf.priority {
+        if nm_set.priority.is_some() || v != 0 {
+            nm_set.priority = Some(v);
+        }
+    }
+
+    if let Some(v) = bond_port_conf.queue_id {
+        nm_set.queue_id = Some(v.into());
+    }
+
+    nm_conn.bond_port = Some(nm_set);
 }

@@ -1,23 +1,7 @@
-#
-# Copyright (c) 2019-2021 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 import pytest
+
 
 import libnmstate
 from libnmstate.schema import Interface
@@ -32,6 +16,8 @@ from ..testlib import cmdlib
 from ..testlib import statelib
 from ..testlib.ovslib import Bridge
 from ..testlib.retry import retry_till_true_or_timeout
+from ..testlib.dummy import nm_unmanaged_dummy
+from ..testlib.yaml import load_yaml
 
 
 BRIDGE0 = "brtest0"
@@ -44,6 +30,7 @@ OVSDB_EXT_IDS_CONF2_STR = {"bak": "2"}
 OVS_DUP_NAME = "br-ex"
 ETH1 = "eth1"
 VERIFY_RETRY_TMO = 5
+DUMMY1 = "dummy1"
 
 
 @pytest.fixture
@@ -140,7 +127,7 @@ def test_remove_ovs_internal_iface_got_port_profile_removed(
                 _get_ovs_port_profile_uuid_of_ovs_interface(ovs_iface_name)
             )
         else:
-            ovs_port_profile_uuid = _get_parent_uuid_of_interface(
+            ovs_port_profile_uuid = _get_ovs_port_uuid_of_ovs_iface(
                 ovs_iface_name
             )
         assert ovs_port_profile_uuid
@@ -190,7 +177,7 @@ def test_remove_ovs_bridge_ignored_port_keeps_it(bridge_with_ports):
 
 def _get_nm_active_profiles():
     all_profile_names_output = cmdlib.exec_cmd(
-        "nmcli -g NAME connection show --active".split(" "), check=True
+        "nmcli -g DEVICE connection show --active".split(" "), check=True
     )[1]
     all_profile_uuids_output = cmdlib.exec_cmd(
         "nmcli -g UUID connection show --active".split(" "), check=True
@@ -202,22 +189,22 @@ def _get_nm_active_profiles():
 
 
 def _get_ovs_port_profile_uuid_of_ovs_interface(iface_name):
-    ovs_iface_uuid = _get_uuid_of_ovs_interface(iface_name)
-    ovs_port_uuid = _get_parent_uuid_of_interface(ovs_iface_uuid)
+    ovs_iface_uuid = _get_uuid_of_device(iface_name, "ovs-interface")
+    ovs_port_uuid = _get_ovs_port_uuid_of_ovs_iface(ovs_iface_uuid)
     cmdlib.exec_cmd(
-        f"nmcli -g connection.id connection show {ovs_port_uuid}".split(" "),
+        f"nmcli -g connection.uuid connection show {ovs_port_uuid}".split(" "),
         check=True,
     )
     return ovs_port_uuid
 
 
-def _get_uuid_of_ovs_interface(iface_name):
+def _get_uuid_of_device(iface_name, device_type):
     conns = cmdlib.exec_cmd(
         "nmcli -g name,uuid,type connection show".split(" "),
         check=True,
     )[1].split("\n")
     ovs_iface_conns = [
-        x for x in conns if "ovs-interface" in x and iface_name in x
+        x for x in conns if device_type in x and iface_name in x
     ]
     if len(ovs_iface_conns) == 0:
         return ""
@@ -225,11 +212,12 @@ def _get_uuid_of_ovs_interface(iface_name):
         return ovs_iface_conns[0].split(":")[1]
 
 
-def _get_parent_uuid_of_interface(iface_name):
-    return cmdlib.exec_cmd(
+def _get_ovs_port_uuid_of_ovs_iface(iface_name):
+    ovs_port_iface_name = cmdlib.exec_cmd(
         f"nmcli -g connection.master connection show {iface_name}".split(" "),
         check=True,
     )[1].strip()
+    return _get_uuid_of_device(ovs_port_iface_name, "ovs-port")
 
 
 def _nmcli_ovs_bridge_with_ipv4_dns():
@@ -535,3 +523,113 @@ def test_do_not_touch_ovs_port_when_not_desired_internal_iface(
 
     assert old_timestamp == new_timestamp
     assert old_uuid == new_uuid
+
+
+def test_gc_on_ovs_dpdk():
+    desired_state = load_yaml(
+        """---
+        interfaces:
+        - name: ovs0
+          type: ovs-interface
+          state: up
+          dpdk:
+            devargs: "0000:af:00.1"
+            n_rxq: 100
+            n_rxq_desc: 1024
+            n_txq_desc: 2048
+        - name: br0
+          type: ovs-bridge
+          state: up
+          bridge:
+            options:
+              datapath: "netdev"
+            port:
+            - name: ovs0
+        """
+    )
+    confs = libnmstate.generate_configurations(desired_state)["NetworkManager"]
+    ovs_iface_conf = [conf for conf in confs if conf[0].startswith("ovs0-if")][
+        0
+    ][1]
+
+    assert "[ovs-dpdk]" in ovs_iface_conf
+    assert "n-rxq-desc=1024" in ovs_iface_conf
+    assert "n-txq-desc=2048" in ovs_iface_conf
+    assert "n-rxq=100" in ovs_iface_conf
+    assert "devargs=0000:af:00.1" in ovs_iface_conf
+
+
+@pytest.fixture
+def unmaaged_dummy1():
+    with nm_unmanaged_dummy(DUMMY1):
+        yield
+
+
+def test_ovs_bond_auto_managed_ignored_port(unmaaged_dummy1, eth1_up):
+    desired_state = load_yaml(
+        f"""---
+        interfaces:
+        - name: br0
+          type: ovs-bridge
+          state: up
+          bridge:
+            port:
+            - name: bond1
+              link-aggregation:
+                mode: balance-slb
+                port:
+                  - name: {DUMMY1}
+                  - name: eth1
+        """,
+    )
+    try:
+        libnmstate.apply(desired_state)
+        assertlib.assert_state_match(desired_state)
+    finally:
+        libnmstate.apply(
+            load_yaml(
+                """---
+                interfaces:
+                - name: br0
+                  type: ovs-bridge
+                  state: absent
+                """,
+            )
+        )
+
+
+def test_ovs_port_has_autoconnect_ports(eth1_up):
+    desired_state = load_yaml(
+        """---
+        interfaces:
+        - name: ovs0
+          type: ovs-interface
+        - name: br0
+          type: ovs-bridge
+          state: up
+          bridge:
+            port:
+            - name: ovs0
+            - name: eth1
+        """,
+    )
+    try:
+        libnmstate.apply(desired_state)
+        assert (
+            cmdlib.exec_cmd(
+                "nmcli -g connection.autoconnect-slaves "
+                "c show ovs0-port".split(),
+            )[1].strip()
+            == "1"
+        )
+    finally:
+        libnmstate.apply(
+            load_yaml(
+                """---
+                interfaces:
+                - name: br0
+                  type: ovs-bridge
+                  state: absent
+                """,
+            )
+        )

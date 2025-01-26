@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{DnsState, MergedDnsState};
+use crate::{DnsState, ErrorKind, MergedDnsState};
 
 #[test]
 fn test_dns_verify_uncompressed_srvs() {
     let current: DnsState = serde_yaml::from_str(
-        r#"---
+        r"---
         config:
           server:
           - '3000::'
@@ -21,12 +21,12 @@ fn test_dns_verify_uncompressed_srvs() {
           - ::ffff:192.0.2.1
           - ::ffff:192.0.2.2
           - 3::4
-        "#,
+        ",
     )
     .unwrap();
 
     let desired: DnsState = serde_yaml::from_str(
-        r#"---
+        r"---
         config:
           server:
           - 3000:0000:0000:0000:0000:0000:0000:0000
@@ -42,11 +42,143 @@ fn test_dns_verify_uncompressed_srvs() {
           - 0:0:0:0:0:FFFF:192.0.2.1
           - ::FFFF:192.0.2.2
           - 03:0000:000:00:0::4
-        "#,
+        ",
     )
     .unwrap();
 
-    let merged = MergedDnsState::new(desired, DnsState::new()).unwrap();
+    let merged = MergedDnsState::new(Some(desired), DnsState::new()).unwrap();
 
-    merged.verify(&current).unwrap();
+    merged.verify(current).unwrap();
+}
+
+#[test]
+fn test_dns_option_with_value() {
+    let mut desired: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          options:
+          - rotate
+          - ndots:9
+        ",
+    )
+    .unwrap();
+    desired.sanitize().unwrap();
+}
+
+#[test]
+fn test_invalid_dns_option_with_value() {
+    let mut desired: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          options:
+          - rotate
+          - ndot:9
+        ",
+    )
+    .unwrap();
+    let result = desired.sanitize();
+    assert!(result.is_err());
+
+    if let Err(e) = result {
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+    }
+}
+
+#[test]
+fn test_is_purge_dns_empty_dict() {
+    let desired: DnsState = serde_yaml::from_str(
+        r"---
+        config: {}
+        ",
+    )
+    .unwrap();
+    let current: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          server:
+          - 192.0.2.251
+          search:
+          - example.org
+          options:
+          - rotate
+        ",
+    )
+    .unwrap();
+    let merged = MergedDnsState::new(Some(desired), current).unwrap();
+    assert!(merged.is_purge());
+}
+
+#[test]
+fn test_is_purge_dns_full_empty_dict() {
+    let desired: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          server: []
+          search: []
+          options: []
+        ",
+    )
+    .unwrap();
+    let current: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          server:
+          - 192.0.2.251
+          search:
+          - example.org
+          options:
+          - rotate
+        ",
+    )
+    .unwrap();
+    let merged = MergedDnsState::new(Some(desired), current).unwrap();
+    assert!(merged.is_purge());
+}
+
+#[test]
+fn test_not_purge() {
+    let desired: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          search: []
+        ",
+    )
+    .unwrap();
+    let current: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          server:
+          - 192.0.2.251
+          search:
+          - example.org
+        ",
+    )
+    .unwrap();
+    let merged = MergedDnsState::new(Some(desired), current).unwrap();
+    assert!(!merged.is_purge());
+}
+
+#[test]
+fn test_purge_with_empty_server_and_search() {
+    let desired: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          server: []
+          search: []
+        ",
+    )
+    .unwrap();
+    let current: DnsState = serde_yaml::from_str(
+        r"---
+        config:
+          server:
+          - 192.0.2.251
+          search:
+          - example.org
+          options: []
+        ",
+    )
+    .unwrap();
+    let merged = MergedDnsState::new(Some(desired), current).unwrap();
+    assert!(merged.is_purge());
 }

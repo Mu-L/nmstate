@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{stdin, stdout, Read, Write};
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 
-use nmstate::{NetworkPolicy, NetworkState};
+use nmstate::NetworkState;
 
-use crate::error::CliError;
+use crate::{error::CliError, state::state_from_fd};
+
+const DEFAULT_TIMEOUT: u32 = 60;
 
 pub(crate) fn apply_from_stdin(
     matches: &clap::ArgMatches,
 ) -> Result<String, CliError> {
-    set_ctrl_c_action();
     apply(&mut stdin(), matches)
 }
 
@@ -20,8 +21,6 @@ pub(crate) fn apply_from_files(
     file_paths: &[&str],
     matches: &clap::ArgMatches,
 ) -> Result<String, CliError> {
-    set_ctrl_c_action();
-
     let mut ret = String::new();
     for file_path in file_paths {
         ret += &apply(&mut std::fs::File::open(file_path)?, matches)?;
@@ -29,66 +28,72 @@ pub(crate) fn apply_from_files(
     Ok(ret)
 }
 
-fn apply<R>(
+pub(crate) fn apply<R>(
     reader: &mut R,
     matches: &clap::ArgMatches,
 ) -> Result<String, CliError>
 where
     R: Read,
 {
-    let kernel_only = matches.is_present("KERNEL");
-    let no_verify = matches.is_present("NO_VERIFY");
-    let no_commit = matches.is_present("NO_COMMIT");
-    let timeout: u32 = match matches.value_of_t("TIMEOUT") {
-        Ok(t) => t,
-        Err(e) => {
-            return Err(CliError {
-                code: crate::error::EX_DATAERR,
-                error_msg: e.to_string(),
-            });
-        }
-    };
-    let mut content = String::new();
-    // Replace non-breaking space '\u{A0}'  to normal space
-    reader.read_to_string(&mut content)?;
-    let content = content.replace('\u{A0}', " ");
-
-    let mut net_state: NetworkState = match serde_yaml::from_str(&content) {
-        Ok(s) => s,
-        Err(state_error) => {
-            // Try NetworkPolicy
-            let net_policy: NetworkPolicy = match serde_yaml::from_str(&content)
-            {
-                Ok(p) => p,
-                Err(policy_error) => {
-                    let e = if content.contains("desiredState")
-                        || content.contains("desired")
-                    {
-                        policy_error
-                    } else {
-                        state_error
-                    };
-                    return Err(CliError::from(format!(
-                        "Provide file is not valid NetworkState or \
-                        NetworkPolicy: {e}"
-                    )));
+    let kernel_only = matches.try_contains_id("KERNEL").unwrap_or_default();
+    let no_verify = matches.try_contains_id("NO_VERIFY").unwrap_or_default();
+    let no_commit = matches.try_contains_id("NO_COMMIT").unwrap_or_default();
+    let override_iface = matches
+        .try_contains_id("OVERRIDE_IFACE")
+        .unwrap_or_default();
+    let timeout = if matches.try_contains_id("TIMEOUT").unwrap_or_default() {
+        match matches.try_get_one::<String>("TIMEOUT") {
+            Ok(Some(t)) => match u32::from_str(t) {
+                Ok(i) => i,
+                Err(e) => {
+                    return Err(CliError {
+                        code: crate::error::EX_DATAERR,
+                        error_msg: e.to_string(),
+                    });
                 }
-            };
-            NetworkState::try_from(net_policy)?
+            },
+            Ok(None) => DEFAULT_TIMEOUT,
+            Err(e) => {
+                return Err(CliError {
+                    code: crate::error::EX_DATAERR,
+                    error_msg: e.to_string(),
+                });
+            }
         }
+    } else {
+        DEFAULT_TIMEOUT
     };
-
+    let mut net_state = state_from_fd(reader)?;
     net_state.set_kernel_only(kernel_only);
     net_state.set_verify_change(!no_verify);
     net_state.set_commit(!no_commit);
     net_state.set_timeout(timeout);
-    net_state.set_memory_only(matches.is_present("MEMORY_ONLY"));
+    net_state.set_override_iface(override_iface);
+    net_state.set_memory_only(
+        matches.try_contains_id("MEMORY_ONLY").unwrap_or_default(),
+    );
+    apply_state(
+        &net_state,
+        matches.try_contains_id("SHOW_SECRETS").unwrap_or_default(),
+    )
+}
 
-    net_state.apply()?;
-    if !matches.is_present("SHOW_SECRETS") {
-        net_state.hide_secrets();
+pub(crate) fn apply_state(
+    state: &NetworkState,
+    show_secrets: bool,
+) -> Result<String, CliError> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|e| {
+            CliError::from(format!("tokio::runtime::Builder failed with {e}"))
+        })?;
+    let mut diff_state = rt.block_on(apply_state_async(state))?;
+    if !show_secrets {
+        diff_state.hide_secrets();
     }
-    let sorted_net_state = crate::query::sort_netstate(net_state)?;
+    let sorted_net_state = crate::query::sort_netstate(diff_state)?;
     Ok(serde_yaml::to_string(&sorted_net_state)?)
 }
 
@@ -133,7 +138,7 @@ pub(crate) fn state_edit(
         }
         net_state
     } else {
-        cur_state
+        cur_state.clone()
     };
     let tmp_file_path = gen_tmp_file_path();
     write_state_to_file(&tmp_file_path, &net_state)?;
@@ -143,8 +148,18 @@ pub(crate) fn state_edit(
     desire_state.set_verify_change(!matches.is_present("NO_VERIFY"));
     desire_state.set_commit(!matches.is_present("NO_COMMIT"));
     desire_state.set_memory_only(matches.is_present("MEMORY_ONLY"));
-    desire_state.apply()?;
-    Ok(serde_yaml::to_string(&desire_state)?)
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(|e| {
+            CliError::from(format!("tokio::runtime::Builder failed with {e}"))
+        })?;
+    let mut diff_state = rt.block_on(apply_state_async(&desire_state))?;
+    if !matches.try_contains_id("SHOW_SECRETS").unwrap_or_default() {
+        diff_state.hide_secrets();
+    }
+    let sorted_net_state = crate::query::sort_netstate(diff_state)?;
+    Ok(serde_yaml::to_string(&sorted_net_state)?)
 }
 
 fn gen_tmp_file_path() -> String {
@@ -233,12 +248,26 @@ fn ask_for_retry() -> bool {
     }
 }
 
-fn set_ctrl_c_action() {
-    ctrlc::set_handler(|| {
-        if let Err(e) = rollback("") {
-            println!("Failed to rollback: {e}");
+async fn apply_state_async(
+    net_state: &NetworkState,
+) -> Result<NetworkState, CliError> {
+    let mut cur_state = NetworkState::new();
+    cur_state.set_kernel_only(net_state.kernel_only());
+    cur_state.set_running_config_only(true);
+    cur_state.retrieve_async().await?;
+
+    let mut ctrlc_stream = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::interrupt(),
+    )
+    .map_err(|e| format!("tokio failed to hook on signal SIGINT: {e}"))?;
+    tokio::select! {
+        _ = ctrlc_stream.recv() => {
+            rollback("")?;
+            Err("Interrupted by SIGINT".into())
         }
-        std::process::exit(1);
-    })
-    .expect("Error setting Ctrl-C handler");
+        result = net_state.apply_async() => {
+            result?;
+            Ok(net_state.gen_diff(&cur_state)?)
+        }
+    }
 }

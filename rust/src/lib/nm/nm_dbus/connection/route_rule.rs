@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Copyright 2021 Red Hat, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,6 +36,7 @@ pub struct NmIpRouteRule {
     pub fw_mask: Option<u32>,
     pub iifname: Option<String>,
     pub action: Option<NmIpRouteRuleAction>,
+    pub suppress_prefixlength: Option<i32>,
     _other: DbusDictionary,
 }
 
@@ -53,6 +56,11 @@ impl TryFrom<DbusDictionary> for NmIpRouteRule {
             iifname: _from_map!(v, "iifname", String::try_from)?,
             action: _from_map!(v, "action", u8::try_from)?
                 .map(NmIpRouteRuleAction::from),
+            suppress_prefixlength: _from_map!(
+                v,
+                "suppress-prefixlength",
+                i32::try_from
+            )?,
             _other: v,
         })
     }
@@ -130,6 +138,12 @@ impl NmIpRouteRule {
                 zvariant::Value::new(zvariant::Value::new(u8::from(*v))),
             )?;
         }
+        if let Some(v) = &self.suppress_prefixlength {
+            ret.append(
+                zvariant::Value::new("suppress-prefixlength"),
+                zvariant::Value::new(zvariant::Value::new(v)),
+            )?;
+        }
 
         for (key, value) in self._other.iter() {
             ret.append(
@@ -196,6 +210,17 @@ impl From<NmIpRouteRuleAction> for u8 {
             NmIpRouteRuleAction::Unreachable => RTN_UNREACHABLE,
             NmIpRouteRuleAction::Prohibit => RTN_PROHIBIT,
             NmIpRouteRuleAction::Other(d) => d,
+        }
+    }
+}
+
+impl std::fmt::Display for NmIpRouteRuleAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NmIpRouteRuleAction::Blackhole => write!(f, "blackhole"),
+            NmIpRouteRuleAction::Unreachable => write!(f, "unreachable"),
+            NmIpRouteRuleAction::Prohibit => write!(f, "prohibit"),
+            NmIpRouteRuleAction::Other(d) => write!(f, "{}", d),
         }
     }
 }

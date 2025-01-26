@@ -1,28 +1,10 @@
-#
-# Copyright (c) 2021-2022 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 from contextlib import contextmanager
 
 import pytest
 
 import libnmstate
-from libnmstate.error import NmstateLibnmError
 from libnmstate.error import NmstateValueError
 from libnmstate.schema import Bridge
 from libnmstate.schema import Interface
@@ -34,8 +16,8 @@ from libnmstate.schema import VLAN
 
 from .testlib import assertlib
 from .testlib import statelib
+from .testlib.apply import apply_with_description
 from .testlib.veth import veth_interface
-from .testlib.env import nm_major_minor_version
 
 
 VETH1 = "veth1"
@@ -44,31 +26,6 @@ VETH2PEER = "veth2peer"
 VETH1_VLAN = "veth1.0"
 
 
-@pytest.mark.skipif(
-    nm_major_minor_version() >= 1.28,
-    reason="Modifying veth interfaces is supported on NetworkManager.",
-)
-@pytest.mark.tier1
-def test_add_veth_not_supported(self):
-    desired_state = {
-        Interface.KEY: [
-            {
-                Interface.NAME: VETH1,
-                Interface.TYPE: InterfaceType.VETH,
-                Interface.STATE: InterfaceState.UP,
-                Veth.CONFIG_SUBTREE: {Veth.PEER: VETH1PEER},
-            }
-        ]
-    }
-
-    with pytest.raises(NmstateLibnmError):
-        libnmstate.apply(desired_state)
-
-
-@pytest.mark.skipif(
-    nm_major_minor_version() <= 1.28,
-    reason="Modifying veth interfaces is not supported on NetworkManager.",
-)
 class TestVeth:
     def test_eth_with_veth_conf(self, eth1_up):
         d_state = {
@@ -111,12 +68,18 @@ class TestVeth:
             ]
         }
         try:
-            libnmstate.apply(d_state)
+            apply_with_description(
+                "Configure the veth device veth1 and its peer device "
+                "veth1peer",
+                d_state,
+            )
             assertlib.assert_state_match(d_state)
         finally:
             d_state[Interface.KEY][0][Interface.STATE] = InterfaceState.ABSENT
             d_state[Interface.KEY][1][Interface.STATE] = InterfaceState.ABSENT
-            libnmstate.apply(d_state)
+            apply_with_description(
+                "Delete the both veth1 and veth1peer devices", d_state
+            )
 
     @pytest.mark.tier1
     def test_add_with_peer_not_mentioned_in_desire(self):
@@ -167,7 +130,9 @@ class TestVeth:
             d_state[Interface.KEY][0][Veth.CONFIG_SUBTREE][
                 Veth.PEER
             ] = VETH2PEER
-            libnmstate.apply(d_state)
+            apply_with_description(
+                "Set the veth1 peer device to be veth2peer", d_state
+            )
 
             c_state = statelib.show_only(
                 (
@@ -204,7 +169,11 @@ class TestVeth:
                 },
             ]
         }
-        libnmstate.apply(d_state)
+        apply_with_description(
+            "Configure the veth1 to have the peer veth1peer, and set up the "
+            "veth1.0 over veth1 with vlan id 0",
+            d_state,
+        )
 
         c_state = statelib.show_only(
             (
@@ -217,7 +186,7 @@ class TestVeth:
 
         d_state[Interface.KEY][0][Interface.STATE] = InterfaceState.ABSENT
         d_state[Interface.KEY][1][Interface.STATE] = InterfaceState.ABSENT
-        libnmstate.apply(d_state)
+        apply_with_description("Remove veth1 and veth1.0 devices", d_state)
 
     @pytest.mark.tier1
     def test_veth_enable_and_disable_accept_all_mac_addresses(self):
@@ -225,13 +194,17 @@ class TestVeth:
             d_state[Interface.KEY][0][
                 Interface.ACCEPT_ALL_MAC_ADDRESSES
             ] = True
-            libnmstate.apply(d_state)
+            apply_with_description(
+                "Enable accepting all mac address on veth1 device", d_state
+            )
             assertlib.assert_state(d_state)
 
             d_state[Interface.KEY][0][
                 Interface.ACCEPT_ALL_MAC_ADDRESSES
             ] = False
-            libnmstate.apply(d_state)
+            apply_with_description(
+                "Disable accepting all mac address on veth1 device", d_state
+            )
             assertlib.assert_state(d_state)
 
         assertlib.assert_absent(VETH1)
@@ -277,10 +250,14 @@ class TestVeth:
             ]
         }
         try:
-            libnmstate.apply(desired_state)
+            apply_with_description(
+                "Create veth1 with veth1peer as peer and 2001:db8:1::1/64",
+                desired_state,
+            )
             assertlib.assert_state_match(desired_state)
         finally:
-            libnmstate.apply(
+            apply_with_description(
+                "Remove the veth1 and veth1peer devices",
                 {
                     Interface.KEY: [
                         {
@@ -336,7 +313,7 @@ class TestVeth:
                 }
             ]
         }
-        libnmstate.apply(desired_state)
+        apply_with_description("Bring up the veth1 device", desired_state)
         assertlib.assert_state_match(desired_state)
 
     def test_change_veth_with_eth_type_without_veth_conf(self, veth1_up):
@@ -349,7 +326,7 @@ class TestVeth:
                 }
             ]
         }
-        libnmstate.apply(desired_state)
+        apply_with_description("Set up the veth1 device", desired_state)
         assertlib.assert_state_match(desired_state)
 
 
@@ -382,12 +359,19 @@ def bridges_with_port():
         ]
     }
     try:
-        libnmstate.apply(d_state)
+        apply_with_description(
+            "veth1 with veth1peer as peer, attach veth1 to OVS bridge "
+            "ovs-br0 and veth1peer to linux bridge br0",
+            d_state,
+        )
         yield d_state
     finally:
         d_state[Interface.KEY][0][Interface.STATE] = InterfaceState.ABSENT
         d_state[Interface.KEY][1][Interface.STATE] = InterfaceState.ABSENT
-        libnmstate.apply(d_state)
+        apply_with_description(
+            "Delete the both ovs bridge ovs-br0 and linux bridge br0",
+            d_state,
+        )
 
 
 @contextmanager
@@ -413,15 +397,30 @@ def veth_interface_both_up(ifname, peer):
         ]
     }
     try:
-        libnmstate.apply(d_state)
+        apply_with_description(
+            f"Configure the veth {ifname} to have the peer {peer}, configure "
+            f"the veth {peer} to have the peer {ifname}",
+            d_state,
+        )
         yield d_state
     finally:
         d_state[Interface.KEY][0][Interface.STATE] = InterfaceState.ABSENT
         d_state[Interface.KEY][1][Interface.STATE] = InterfaceState.ABSENT
-        libnmstate.apply(d_state)
+        apply_with_description(
+            f"Delete the veth device {ifname} and the veth peer device {peer}",
+            d_state,
+        )
 
 
 @pytest.fixture
 def veth1_up():
     with veth_interface(VETH1, VETH1PEER):
         yield
+
+
+# https://issues.redhat.com/browse/RHEL-32698
+@pytest.mark.tier1
+def test_show_veth_as_veth_iface_type(veth1_up):
+    state = statelib.show_only((VETH1,))
+    assert state[Interface.KEY][0][Interface.NAME] == VETH1
+    assert state[Interface.KEY][0][Interface.TYPE] == InterfaceType.VETH

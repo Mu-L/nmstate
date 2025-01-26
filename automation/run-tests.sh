@@ -16,12 +16,13 @@ TEST_TYPE_INTEG_TIER1="integ_tier1"
 TEST_TYPE_INTEG_TIER2="integ_tier2"
 TEST_TYPE_INTEG_SLOW="integ_slow"
 
-FEDORA_IMAGE_DEV="docker.io/nmstate/fedora-nmstate-dev"
+FEDORA_IMAGE_DEV="quay.io/nmstate/fed-nmstate-dev:latest"
+RAWHIDE_IMAGE_DEV="quay.io/nmstate/fed-nmstate-dev:rawhide"
 CENTOS_8_STREAM_IMAGE_DEV="quay.io/nmstate/c8s-nmstate-dev"
 CENTOS_9_STREAM_IMAGE_DEV="quay.io/nmstate/c9s-nmstate-dev"
+CENTOS_10_STREAM_IMAGE_DEV="quay.io/nmstate/c10s-nmstate-dev"
 
-CREATED_INTERFACES=""
-INTERFACES="eth1 eth2"
+COLLECT_LOGS="true"
 
 PYTEST_OPTIONS="--verbose --verbose \
         --log-file-level=DEBUG \
@@ -63,7 +64,11 @@ function install_nmstate {
         if [ -n "$COMPILED_RPMS_DIR" ];then
             exec_cmd "rpm -ivh ${COMPILED_RPMS_DIR}/*.rpm || exit 1"
         else
-            exec_cmd "SKIP_VENDOR_CREATION=1 make rpm"
+            exec_cmd "make srpm"
+            exec_cmd "dnf install -y 'dnf-command(builddep)'"
+            exec_cmd "dnf builddep -y *.src.rpm"
+            exec_cmd "rm -f *.src.rpm"
+            exec_cmd "make rpm"
             exec_cmd "rpm -ivh *.rpm"
         fi
     fi
@@ -77,7 +82,7 @@ function run_tests {
 
     if [ $TEST_TYPE == $TEST_TYPE_ALL ] || \
        [ $TEST_TYPE == $TEST_TYPE_LINT ];then
-        exec_cmd "tox -e flake8,pylint,yamllint"
+        exec_cmd "tox -e flake8,yamllint"
     fi
 
     if [ $TEST_TYPE == $TEST_TYPE_ALL ] || \
@@ -97,6 +102,7 @@ function run_tests {
             pytest \
             $PYTEST_OPTIONS \
             --junitxml=junit.integ.xml \
+            --dump-states \
             tests/integration \
             ${nmstate_pytest_extra_args}"
     fi
@@ -107,6 +113,7 @@ function run_tests {
           pytest \
             $PYTEST_OPTIONS \
             --junitxml=junit.integ_tier1.xml \
+            --dump-states \
             -m tier1 \
             tests/integration \
             ${nmstate_pytest_extra_args}"
@@ -118,6 +125,7 @@ function run_tests {
           pytest \
             $PYTEST_OPTIONS \
             --junitxml=junit.integ_tier2.xml \
+            --dump-states \
             -m tier2 \
             tests/integration \
             ${nmstate_pytest_extra_args}"
@@ -130,6 +138,7 @@ function run_tests {
           pytest \
             $PYTEST_OPTIONS \
             --junitxml=junit.integ_slow.xml \
+            --dump-states \
             -m slow --runslow \
             tests/integration \
             ${nmstate_pytest_extra_args}"
@@ -155,13 +164,13 @@ function write_separator {
 
 function run_exit {
     write_separator "TEARDOWN"
-    if [ -n "${RUN_BAREMETAL}" ]; then
-        teardown_network_environment
-    elif [ -n "${RUN_K8S}" ]; then
+    if [ -n "${RUN_K8S}" ]; then
         k8s::collect_artifacts
         k8s::cleanup
     else
-        collect_artifacts
+        if [ $COLLECT_LOGS == "true" ];then
+            collect_artifacts
+        fi
         remove_container
         remove_tempdir
     fi
@@ -185,78 +194,48 @@ function check_services {
     '
 }
 
-function check_iface_exist {
-    exec_cmd "ip link | grep -q ' $1'"
-}
-
-function prepare_network_environment {
-    set +e
-    for device in $INTERFACES;
-    do
-        peer="${device}peer"
-        check_iface_exist $device
-        if [ $? -eq 1 ]; then
-            CREATED_INTERFACES="${CREATED_INTERFACES} ${device}"
-            exec_cmd "ip link add ${device} type veth peer name ${peer}"
-            exec_cmd "ip link set ${peer} up"
-            exec_cmd "ip link set ${device} up"
-            exec_cmd "nmcli device set ${device} managed yes"
-            exec_cmd "nmcli device set ${peer} managed no"
-        fi
-    done
-    set -e
-}
-
-function teardown_network_environment {
-    for device in $CREATED_INTERFACES;
-    do
-        exec_cmd "ip link del ${device}"
-    done
-}
-
-function clean_dnf_cache {
-    # Workaround for dnf failure:
-    # [Errno 2] No such file or directory: '/var/cache/dnf/metadata_lock.pid'
-    if [[ "$CI" == "true" ]];then
-        exec_cmd "rm -fv /var/cache/dnf/metadata_lock.pid"
-        exec_cmd "dnf clean all"
-        exec_cmd "dnf makecache || :"
-    fi
-}
-
 function upgrade_nm_from_copr {
     local copr_repo=$1
     # The repoid for a Copr repo is the name with the slash replaces by a colon
     local copr_repo_id="copr:copr.fedorainfracloud.org:${copr_repo/\//:}"
-    clean_dnf_cache
-    exec_cmd "command -v dnf && plugin='dnf-command(copr)' || plugin='yum-plugin-copr'; yum install --assumeyes \$plugin;"
-    exec_cmd "yum copr enable --assumeyes ${copr_repo}"
+    exec_cmd "dnf5 install --assumeyes 'dnf5-command(copr)' || \
+              dnf install --assumeyes 'dnf-command(copr)'"
+    exec_cmd "dnf copr enable --assumeyes ${copr_repo}"
     # centos-stream NetworkManager package is providing the alpha builds.
     # Sometimes it could be greater than the one packaged on Copr.
+    exec_cmd "systemctl stop NetworkManager"
     exec_cmd "dnf remove --assumeyes --noautoremove NetworkManager"
     exec_cmd "dnf install --assumeyes NetworkManager NetworkManager-ovs  \
         --disablerepo '*' --enablerepo '${copr_repo_id}'"
+    exec_cmd "dnf install --assumeyes NetworkManager-libreswan"
 }
 
 function upgrade_nm_from_rpm_dir {
     local nm_rpm_dir=$1
     mkdir $EXPORT_DIR/nm_rpms || true
     find $nm_rpm_dir -name \*.rpm -exec cp -v {} "${EXPORT_DIR}/nm_rpms/" \;
+    exec_cmd "systemctl stop NetworkManager"
     exec_cmd "dnf remove --assumeyes --noautoremove NetworkManager"
     exec_cmd "dnf install -y ${CONT_EXPORT_DIR}/nm_rpms/*.rpm"
+    exec_cmd "rpm -q NetworkManager-libreswan || \
+        dnf install -y NetworkManager-libreswan"
+    # It is fragile for the system to have connectivity check enabled in the
+    # integration testing, NM will add the penalty metric to the route when the
+    # machine is not connected to the Internet
+    exec_cmd "dnf remove --assumeyes NetworkManager-config-connectivity"
 }
 
 function run_customize_command {
     if [[ -n "$customize_cmd" ]];then
-        clean_dnf_cache
         exec_cmd "${customize_cmd}"
     fi
 }
 
 options=$(getopt --options "" \
     --long "customize:,pytest-args:,help,debug-shell,test-type:,\
-    el8,el9,centos-stream,copr:,artifacts-dir:,test-vdsm,machine,k8s,\
-    use-installed-nmstate,compiled-rpms-dir:,nm-rpm-dir:" \
+    el8,el9,el10,centos-stream,fed,rawhide,copr:,artifacts-dir:,test-vdsm,\
+    machine,k8s,use-installed-nmstate,compiled-rpms-dir:,nm-rpm-dir:,nolog,\
+    pretest-exec:" \
     -- "${@}")
 eval set -- "$options"
 while true; do
@@ -287,11 +266,20 @@ while true; do
     --el8)
         CONTAINER_IMAGE=$CENTOS_8_STREAM_IMAGE_DEV
         ;;
+    --centos-stream)
+        CONTAINER_IMAGE=$CENTOS_9_STREAM_IMAGE_DEV
+        ;;
     --el9)
         CONTAINER_IMAGE=$CENTOS_9_STREAM_IMAGE_DEV
         ;;
-    --centos-stream)
-        CONTAINER_IMAGE=$CENTOS_8_STREAM_IMAGE_DEV
+    --el10)
+        CONTAINER_IMAGE=$CENTOS_10_STREAM_IMAGE_DEV
+        ;;
+    --fed)
+        CONTAINER_IMAGE=$FEDORA_IMAGE_DEV
+        ;;
+    --rawhide)
+        CONTAINER_IMAGE=$RAWHIDE_IMAGE_DEV
         ;;
     --artifacts-dir)
         shift
@@ -307,12 +295,19 @@ while true; do
     --k8s)
         RUN_K8S="true"
         ;;
+    --nolog)
+        COLLECT_LOGS="false"
+        ;;
     --use-installed-nmstate)
         INSTALL_NMSTATE="false"
         ;;
     --compiled-rpms-dir)
         shift
         COMPILED_RPMS_DIR="$1"
+        ;;
+    --pretest-exec)
+        shift
+        PRETEST_EXEC="$1"
         ;;
     --help)
         set +x
@@ -380,12 +375,6 @@ if [ -z "${RUN_K8S}" ]; then
     check_services
 fi
 
-if [ $TEST_TYPE != $TEST_TYPE_ALL ] && \
-   [ $TEST_TYPE != $TEST_TYPE_LINT ] && \
-   [ $TEST_TYPE != $TEST_TYPE_FORMAT ];then
-    prepare_network_environment
-fi
-
 if [ -n "$RUN_BAREMETAL" ];then
     trap run_exit ERR EXIT
 fi
@@ -402,4 +391,9 @@ if [ $TEST_TYPE != $TEST_TYPE_ALL ] && \
    [ $TEST_TYPE != $TEST_TYPE_FORMAT ];then
     install_nmstate
 fi
+
+if [[ -v PRETEST_EXEC ]];then
+    exec_cmd "$PRETEST_EXEC"
+fi
+
 run_tests

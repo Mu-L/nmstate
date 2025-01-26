@@ -2,7 +2,10 @@
 
 use crate::{
     nispor::{
+        dns::apply_dns_conf_to_etc,
+        hostname::set_running_hostname,
         ip::{nmstate_ipv4_to_np, nmstate_ipv6_to_np},
+        route::gen_nispor_route_confs,
         veth::nms_veth_conf_to_np,
         vlan::nms_vlan_conf_to_np,
     },
@@ -10,10 +13,10 @@ use crate::{
     MergedNetworkState, NmstateError,
 };
 
-pub(crate) fn nispor_apply(
+pub(crate) async fn nispor_apply(
     merged_state: &MergedNetworkState,
 ) -> Result<(), NmstateError> {
-    delete_ifaces(&merged_state.interfaces)?;
+    delete_ifaces(&merged_state.interfaces).await?;
 
     let mut ifaces: Vec<&MergedInterface> = merged_state
         .interfaces
@@ -44,14 +47,31 @@ pub(crate) fn nispor_apply(
     let mut net_conf = nispor::NetConf::default();
     net_conf.ifaces = Some(np_ifaces);
 
-    if let Err(e) = net_conf.apply() {
-        Err(NmstateError::new(
+    if merged_state.routes.is_changed() {
+        net_conf.routes = Some(gen_nispor_route_confs(&merged_state.routes)?);
+    }
+
+    if let Err(e) = net_conf.apply_async().await {
+        return Err(NmstateError::new(
             ErrorKind::PluginFailure,
             format!("Unknown error from nipsor plugin: {}, {}", e.kind, e.msg),
-        ))
-    } else {
-        Ok(())
+        ));
     }
+
+    if let Some(running_hostname) = merged_state
+        .hostname
+        .desired
+        .as_ref()
+        .and_then(|c| c.running.as_ref())
+    {
+        set_running_hostname(running_hostname)?;
+    }
+
+    if merged_state.dns.is_changed() {
+        apply_dns_conf_to_etc(&merged_state.dns)?;
+    }
+
+    Ok(())
 }
 
 fn nmstate_iface_type_to_np(
@@ -98,7 +118,7 @@ fn nmstate_iface_to_np(
         np_iface.ipv6 = Some(nmstate_ipv6_to_np(base_iface.ipv6.as_ref()));
     }
 
-    np_iface.mac_address = base_iface.mac_address.clone();
+    np_iface.mac_address.clone_from(&base_iface.mac_address);
 
     if let Interface::Ethernet(eth_iface) = nms_iface {
         np_iface.veth = nms_veth_conf_to_np(eth_iface.veth.as_ref());
@@ -109,7 +129,9 @@ fn nmstate_iface_to_np(
     Ok(np_iface)
 }
 
-fn delete_ifaces(merged_ifaces: &MergedInterfaces) -> Result<(), NmstateError> {
+async fn delete_ifaces(
+    merged_ifaces: &MergedInterfaces,
+) -> Result<(), NmstateError> {
     let mut deleted_veths: Vec<&str> = Vec::new();
     let mut np_ifaces: Vec<nispor::IfaceConf> = Vec::new();
     for iface in merged_ifaces
@@ -140,7 +162,7 @@ fn delete_ifaces(merged_ifaces: &MergedInterfaces) -> Result<(), NmstateError> {
     let mut net_conf = nispor::NetConf::default();
     net_conf.ifaces = Some(np_ifaces);
 
-    if let Err(e) = net_conf.apply() {
+    if let Err(e) = net_conf.apply_async().await {
         Err(NmstateError::new(
             ErrorKind::PluginFailure,
             format!("Unknown error from nipsor plugin: {}, {}", e.kind, e.msg),
