@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::super::{
     connection::DbusDictionary, ErrorKind, NmError, ToDbusValue,
@@ -68,7 +70,7 @@ const VALID_FEATURES: [&str; 58] = [
     "feature-tx-vlan-stag-hw-insert",
 ];
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(try_from = "DbusDictionary")]
 #[non_exhaustive]
 pub struct NmSettingEthtool {

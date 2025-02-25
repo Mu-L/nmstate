@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Copyright 2021 Red Hat, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,16 +18,17 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::super::{
-    connection::DbusDictionary, NmError, NmVlanProtocol, ToDbusValue,
+    connection::{DbusDictionary, DBUS_ASV_SIGNATURE},
+    NmError, NmVlanProtocol, ToDbusValue,
 };
 
 pub(crate) const NM_TERNARY_TRUE: i32 = 1;
 pub(crate) const NM_TERNARY_FALSE: i32 = 0;
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(try_from = "DbusDictionary")]
 #[non_exhaustive]
 pub struct NmSettingSriov {
@@ -71,9 +74,7 @@ impl ToDbusValue for NmSettingSriov {
             ret.insert("total-vfs", zvariant::Value::new(v));
         }
         if let Some(vfs) = self.vfs.as_ref() {
-            let mut vf_values = zvariant::Array::new(
-                zvariant::Signature::from_str_unchecked("a{sv}"),
-            );
+            let mut vf_values = zvariant::Array::new(DBUS_ASV_SIGNATURE);
             for vf in vfs {
                 vf_values.append(vf.to_value()?)?;
             }
@@ -87,7 +88,7 @@ impl ToDbusValue for NmSettingSriov {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(try_from = "DbusDictionary")]
 #[non_exhaustive]
 pub struct NmSettingSriovVf {
@@ -120,8 +121,8 @@ impl TryFrom<DbusDictionary> for NmSettingSriovVf {
 impl NmSettingSriovVf {
     pub(crate) fn to_value(&self) -> Result<zvariant::Value, NmError> {
         let mut ret = zvariant::Dict::new(
-            zvariant::Signature::from_str_unchecked("s"),
-            zvariant::Signature::from_str_unchecked("v"),
+            &zvariant::Signature::Str,
+            &zvariant::Signature::Variant,
         );
 
         if let Some(v) = &self.index {
@@ -161,9 +162,7 @@ impl NmSettingSriovVf {
             )?;
         }
         if let Some(vlans) = self.vlans.as_ref() {
-            let mut vlan_values = zvariant::Array::new(
-                zvariant::Signature::from_str_unchecked("a{sv}"),
-            );
+            let mut vlan_values = zvariant::Array::new(DBUS_ASV_SIGNATURE);
             for vlan in vlans {
                 vlan_values.append(vlan.to_value()?)?;
             }
@@ -183,7 +182,7 @@ impl NmSettingSriovVf {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(try_from = "DbusDictionary")]
 #[non_exhaustive]
 pub struct NmSettingSriovVfVlan {
@@ -211,8 +210,8 @@ impl TryFrom<DbusDictionary> for NmSettingSriovVfVlan {
 impl NmSettingSriovVfVlan {
     pub(crate) fn to_value(&self) -> Result<zvariant::Value, NmError> {
         let mut ret = zvariant::Dict::new(
-            zvariant::Signature::from_str_unchecked("s"),
-            zvariant::Signature::from_str_unchecked("v"),
+            &zvariant::Signature::Str,
+            &zvariant::Signature::Variant,
         );
         ret.append(
             zvariant::Value::new("id"),

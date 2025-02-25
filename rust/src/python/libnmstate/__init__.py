@@ -1,5 +1,8 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
 from .clib_wrapper import NmstateError
 from .gen_conf import generate_configurations
+from .gen_diff import generate_differences
 from .netapplier import apply
 from .netapplier import commit
 from .netapplier import rollback
@@ -13,13 +16,14 @@ __all__ = [
     "PrettyState",
     "apply",
     "commit",
-    "generate_configurations",
     "gen_net_state_from_policy",
+    "generate_configurations",
+    "generate_differences",
     "rollback",
     "show",
     "show_running_config",
 ]
 
-__version__ = "2.2.6"
+__version__ = "2.2.42"
 
 BASE_ON_RUST = True

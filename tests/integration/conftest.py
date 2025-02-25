@@ -1,41 +1,39 @@
-#
-# Copyright (c) 2018-2020 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 import logging
 import os
 import subprocess
 import tempfile
 
+from pathlib import Path
+
 import pytest
 
 import libnmstate
+from libnmstate.schema import Description
 from libnmstate.schema import DNS
 from libnmstate.schema import Route
 from libnmstate.schema import RouteRule
 
 from .testlib import ifacelib
+from .testlib.veth import create_veth_pair
+from .testlib.veth import remove_veth_pair
 
 
 REPORT_HEADER = """RPMs: {rpms}
 OS: {osname}
 nmstate: {nmstate_version}
 """
+
+ISOLATE_NAMESPACE = "nmstate_test_ep"
+LIBNMSTATE_APPLY = libnmstate.apply
+LIBNMSTATE_SHOW = libnmstate.show
+DUMP_STATES_DIR = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), ".states"
+)
+# Dump YAMLs for AI training
+OPT_DUMP_AI_TRAIN_YAML = "--dump-ai-train-yaml"
+DUMP_AI_TRAIN_YAML = False
 
 
 def pytest_configure(config):
@@ -48,12 +46,35 @@ def pytest_addoption(parser):
     parser.addoption(
         "--runslow", action="store_true", default=False, help="run slow tests"
     )
+    parser.addoption(
+        "--dump-states",
+        action="store_true",
+        default=False,
+        help="dump applied and showed network states",
+    )
+    parser.addoption(
+        OPT_DUMP_AI_TRAIN_YAML,
+        action="store_true",
+        default=False,
+        help="dump applied network states with top description only",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
     if not config.getoption("--runslow"):
         # --runslow is not in cli: skip slow tests
         _mark_skip_slow_tests(items)
+
+    if config.getoption(OPT_DUMP_AI_TRAIN_YAML):
+        global DUMP_AI_TRAIN_YAML
+        DUMP_AI_TRAIN_YAML = True
+
+    if config.getoption("--dump-states") or config.getoption(
+        OPT_DUMP_AI_TRAIN_YAML
+    ):
+        libnmstate.apply = _custom_apply_with_dump_state
+        libnmstate.show = _custom_show_with_dump_state
+
     _mark_tier2_tests(items)
 
 
@@ -71,27 +92,19 @@ def _mark_tier2_tests(items):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def fix_ip_netns_issue(scope="session", autouse=True):
-    if os.getenv("CI"):
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            subprocess.run(
-                f"mount -t sysfs --make-private {tmpdirname}".split(),
-                check=True,
-            )
-            yield
-            subprocess.run(f"umount {tmpdirname}".split())
-    else:
-        yield
-
-
-@pytest.fixture(scope="session", autouse=True)
 def test_env_setup():
     _logging_setup()
     old_state = libnmstate.show()
     old_state = _remove_interfaces_from_env(old_state)
     _remove_dns_route_route_rule()
+    for nic_name in ["eth1", "eth2"]:
+        remove_veth_pair(nic_name, ISOLATE_NAMESPACE)
+    for nic_name in ["eth1", "eth2"]:
+        create_veth_pair(nic_name, f"{nic_name}.ep", ISOLATE_NAMESPACE)
     _ethx_init()
     yield
+    for nic_name in ["eth1", "eth2"]:
+        remove_veth_pair(nic_name, ISOLATE_NAMESPACE)
     restore_old_state(old_state)
 
 
@@ -144,13 +157,13 @@ def _remove_interfaces_from_env(state):
 
 
 @pytest.fixture(scope="function")
-def eth1_up():
+def eth1_up(test_env_setup):
     with ifacelib.iface_up("eth1") as ifstate:
         yield ifstate
 
 
 @pytest.fixture(scope="function")
-def eth2_up():
+def eth2_up(test_env_setup):
     with ifacelib.iface_up("eth2") as ifstate:
         yield ifstate
 
@@ -160,8 +173,13 @@ port1_up = eth2_up
 
 
 def pytest_report_header(config):
+    nm_ver = _get_package_nvr("NetworkManager")
+    try:
+        nm_libreswan_ver = _get_package_nvr("NetworkManager-libreswan")
+    except subprocess.CalledProcessError:
+        nm_libreswan_ver = "NetworkManager-libreswan (not installed)"
     return REPORT_HEADER.format(
-        rpms=_get_package_nvr("NetworkManager"),
+        rpms=f"{nm_ver} {nm_libreswan_ver}",
         osname=_get_osname(),
         nmstate_version=_get_nmstate_version(),
     )
@@ -178,9 +196,9 @@ def _get_nmstate_version():
 
 
 def _get_package_nvr(package):
-    return (
-        subprocess.check_output(["rpm", "-q", package]).strip().decode("utf-8")
-    )
+    return subprocess.check_output(
+        ["rpm", "-q", "--qf", "%{name}-%{VERSION}-%{RELEASE}", package]
+    ).decode("utf-8")
 
 
 def _get_osname():
@@ -189,6 +207,60 @@ def _get_osname():
             if line.startswith("PRETTY_NAME="):
                 return line.split("=", maxsplit=1)[1].strip().strip('"')
     return ""
+
+
+def _dump_state(
+    state,
+):
+    path = Path(DUMP_STATES_DIR)
+    path.mkdir(exist_ok=True)
+    test_name = (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        .split(":")[-1]
+        .split(" ")[0]
+        .lower()
+    )
+    state_file = tempfile.NamedTemporaryFile(
+        dir=path, prefix=test_name + "-", suffix=".yml", delete=False
+    )
+    with open(state_file.name, "a") as outfile:
+        outfile.write(libnmstate.PrettyState(state).yaml)
+
+
+def _custom_apply_with_dump_state(
+    desired_state,
+    *args,
+    **kwargs,
+):
+    if DUMP_AI_TRAIN_YAML:
+        cur_state = libnmstate.show()
+    result = LIBNMSTATE_APPLY(
+        desired_state,
+        *args,
+        **kwargs,
+    )
+    if DUMP_AI_TRAIN_YAML:
+        if Description.KEY in desired_state:
+            diff_state = libnmstate.generate_differences(
+                desired_state, cur_state
+            )
+            _dump_state(diff_state)
+    else:
+        _dump_state(desired_state)
+    return result
+
+
+def _custom_show_with_dump_state(
+    *args,
+    **kwargs,
+):
+    current_state = LIBNMSTATE_SHOW(
+        *args,
+        **kwargs,
+    )
+    if not DUMP_AI_TRAIN_YAML:
+        _dump_state(current_state)
+    return current_state
 
 
 # Only restore the interface with IPv4/IPv6 gateway with IP/DNS config only

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
@@ -15,6 +14,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 /// Bridge interface provided by linux kernel.
+///
 /// When serializing or deserializing, the [BaseInterface] will
 /// be flatted and [LinuxBridgeConfig] stored as `bridge` section. The yaml
 /// output [crate::NetworkState] containing an example linux bridge interface:
@@ -100,14 +100,27 @@ impl LinuxBridgeInterface {
         Self::default()
     }
 
-    pub(crate) fn sanitize(&mut self) -> Result<(), NmstateError> {
+    pub(crate) fn sanitize(
+        &mut self,
+        is_desired: bool,
+    ) -> Result<(), NmstateError> {
+        if let Some(opts) =
+            self.bridge.as_ref().and_then(|b| b.options.as_ref())
+        {
+            if is_desired {
+                opts.validate_vlan_default_pvid(self)?;
+            }
+        }
+
         if let Some(opts) =
             self.bridge.as_mut().and_then(|b| b.options.as_mut())
         {
             opts.sanitize_group_fwd_mask(&self.base)?;
         }
         self.sort_ports();
-        self.sanitize_stp_opts()?;
+        if is_desired {
+            self.sanitize_stp_opts()?;
+        }
         self.use_upper_case_of_mac_address();
         self.flatten_port_vlan_ranges();
         self.sort_port_vlans();
@@ -119,15 +132,11 @@ impl LinuxBridgeInterface {
         {
             for port_conf in port_confs {
                 if let Some(vlan_conf) = port_conf.vlan.as_ref() {
-                    vlan_conf.sanitize()?;
+                    vlan_conf.sanitize(is_desired)?;
                 }
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn sanitize_for_verify(&mut self) {
-        self.treat_none_vlan_as_empty_dict();
     }
 
     fn use_upper_case_of_mac_address(&mut self) {
@@ -167,22 +176,6 @@ impl LinuxBridgeInterface {
                     .vlan
                     .as_mut()
                     .map(BridgePortVlanConfig::sort_trunk_tags);
-            }
-        }
-    }
-
-    // This is for verifying when user desire `vlan: {}` for resetting VLAN
-    // filtering, the new current state will show as `vlan: None`.
-    fn treat_none_vlan_as_empty_dict(&mut self) {
-        if let Some(port_confs) = self
-            .bridge
-            .as_mut()
-            .and_then(|br_conf| br_conf.port.as_mut())
-        {
-            for port_conf in port_confs {
-                if port_conf.vlan.is_none() {
-                    port_conf.vlan = Some(BridgePortVlanConfig::new());
-                }
             }
         }
     }
@@ -333,7 +326,7 @@ impl LinuxBridgeInterface {
                         if cur_port_conf.name.as_str()
                             == des_port_conf.name.as_str()
                         {
-                            new_port.vlan = cur_port_conf.vlan.clone();
+                            new_port.vlan.clone_from(&cur_port_conf.vlan);
                             break;
                         }
                     }
@@ -541,6 +534,8 @@ pub struct LinuxBridgeOptions {
     pub stp: Option<LinuxBridgeStpOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vlan_protocol: Option<VlanProtocol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vlan_default_pvid: Option<u16>,
 }
 
 impl LinuxBridgeOptions {
@@ -578,6 +573,26 @@ impl LinuxBridgeOptions {
                 self.group_forward_mask = None;
             }
             _ => (),
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_vlan_default_pvid(
+        &self,
+        linux_bridge: &LinuxBridgeInterface,
+    ) -> Result<(), NmstateError> {
+        if let Some(pvid) = self.vlan_default_pvid {
+            if pvid != 1 && !linux_bridge.vlan_filtering_is_enabled() {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    format!(
+                        "Linux bridge {} has vlan-default-pvid different \
+                        than 1 but VLAN filtering is not enabled.",
+                        linux_bridge.base.name.as_str()
+                    ),
+                ));
+            }
         }
 
         Ok(())
@@ -766,7 +781,7 @@ where
         PhantomData<fn() -> Option<LinuxBridgeMulticastRouterType>>,
     );
 
-    impl<'de> Visitor<'de> for IntegerOrString {
+    impl Visitor<'_> for IntegerOrString {
         type Value = Option<LinuxBridgeMulticastRouterType>;
 
         fn expecting(

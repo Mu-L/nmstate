@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryFrom;
+use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
@@ -120,6 +120,15 @@ pub struct RouteRuleEntry {
     /// Incoming interface.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iif: Option<String>,
+    /// Prefix length of suppressor.
+    /// Can deserialize from `suppress-prefix-length` or
+    /// `suppress_prefixlength`.
+    /// Serialize into `suppress-prefix-length`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "suppress_prefixlength"
+    )]
+    pub suppress_prefix_length: Option<u32>,
 }
 
 impl RouteRuleEntry {
@@ -214,7 +223,7 @@ impl RouteRuleEntry {
             if !ip_from.is_empty() {
                 let ip_from = if !ip_from.contains('/') {
                     match InterfaceIpAddr::try_from(ip_from) {
-                        Ok(ref i) => i.into(),
+                        Ok(i) => i.to_string(),
                         Err(e) => {
                             log::error!("{}", e);
                             return false;
@@ -238,7 +247,7 @@ impl RouteRuleEntry {
             if !ip_to.is_empty() {
                 let ip_to = if !ip_to.contains('/') {
                     match InterfaceIpAddr::try_from(ip_to) {
-                        Ok(ref i) => i.into(),
+                        Ok(ref i) => i.to_string(),
                         Err(e) => {
                             log::error!("{}", e);
                             return false;
@@ -258,9 +267,17 @@ impl RouteRuleEntry {
                 return false;
             }
         }
+        if self.family.is_some()
+            && other.family.is_some()
+            && self.family != other.family
+        {
+            return false;
+        }
+
         if self.priority.is_some()
             && self.priority != Some(RouteRuleEntry::USE_DEFAULT_PRIORITY)
             && self.priority != other.priority
+            && !(self.priority == Some(0) && other.priority.is_none())
         {
             return false;
         }
@@ -286,12 +303,19 @@ impl RouteRuleEntry {
         if self.action.is_some() && self.action != other.action {
             return false;
         }
+        if self.suppress_prefix_length.is_some()
+            && self.suppress_prefix_length != other.suppress_prefix_length
+        {
+            return false;
+        }
         true
     }
 
     // Return tuple of (no_absent, is_ipv4, table_id, ip_from,
-    // ip_to, priority, fwmark, fwmask, action)
-    fn sort_key(&self) -> (bool, bool, u32, &str, &str, i64, u32, u32, u8) {
+    // ip_to, priority, fwmark, fwmask, action, suppress_prefix_length)
+    fn sort_key(
+        &self,
+    ) -> (bool, bool, u32, &str, &str, i64, u32, u32, u8, u32) {
         (
             !matches!(self.state, Some(RouteRuleState::Absent)),
             {
@@ -318,6 +342,7 @@ impl RouteRuleEntry {
             self.fwmark.unwrap_or(0),
             self.fwmask.unwrap_or(0),
             self.action.map(u8::from).unwrap_or(0),
+            self.suppress_prefix_length.unwrap_or_default(),
         )
     }
 
@@ -403,6 +428,12 @@ impl PartialOrd for RouteRuleEntry {
     }
 }
 
+impl Hash for RouteRuleEntry {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.sort_key().hash(state);
+    }
+}
+
 impl std::fmt::Display for RouteRuleEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut props = Vec::new();
@@ -435,6 +466,9 @@ impl std::fmt::Display for RouteRuleEntry {
         }
         if let Some(v) = self.action.as_ref() {
             props.push(format!("action: {v}"));
+        }
+        if let Some(v) = self.suppress_prefix_length.as_ref() {
+            props.push(format!("suppress-prefix-length: {v}"));
         }
         write!(f, "{}", props.join(" "))
     }
@@ -480,8 +514,8 @@ impl From<RouteRuleAction> for u8 {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MergedRouteRules {
-    desired: RouteRules,
-    current: RouteRules,
+    pub(crate) desired: RouteRules,
+    pub(crate) current: RouteRules,
     // The `for_apply` will hold two type of route rule:
     //  * Desired route rules
     //  * Current route rules been marked as absent

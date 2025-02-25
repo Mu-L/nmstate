@@ -1,17 +1,23 @@
 ---
 specfile_path: nmstate.spec
 upstream_package_name: nmstate
-upstream_project_url: http://nmstate.io
+upstream_project_url: https://nmstate.io
 enable_net: true
 srpm_build_deps:
+  - cargo
   - make
   - git
+  - tar
+  - xz
+notifications:
+  pull_request:
+    successful_build: true
 actions:
   post-upstream-clone:
     - "make packaging/nmstate.spec"
-    - "mv packaging/nmstate.spec ./"
-  create-archive:
-    - "env SKIP_VENDOR_CREATION=1 make dist"
+    - "cp packaging/nmstate.spec nmstate.spec"
+  fix-spec-file:
+    - "make dist"
   get-current-version:
     - "cat VERSION"
 jobs:
@@ -19,7 +25,5 @@ jobs:
     trigger: pull_request
     metadata:
       targets:
-        - centos-stream-8-x86_64
         - centos-stream-9-x86_64
-        - epel-8-x86_64
         - epel-9-x86_64

@@ -4,52 +4,51 @@ use std::collections::HashMap;
 
 use crate::nm::nm_dbus::{
     NmActiveConnection, NmApi, NmConnection, NmDevice, NmDeviceState,
-    NmLldpNeighbor, NM_ACTIVATION_STATE_FLAG_EXTERNAL,
+    NmIfaceType, NmLldpNeighbor, NM_ACTIVATION_STATE_FLAG_EXTERNAL,
 };
 
 use super::{
     active_connection::create_index_for_nm_acs_by_name_type,
     error::nm_error_to_nmstate,
     query_apply::{
-        create_index_for_nm_conns_by_name_type, dns::nm_global_dns_to_nmstate,
-        get_description, get_lldp, is_lldp_enabled, is_mptcp_supported,
-        nm_802_1x_to_nmstate, nm_ip_setting_to_nmstate4,
-        nm_ip_setting_to_nmstate6, query_nmstate_wait_ip, retrieve_dns_info,
+        create_index_for_nm_conns_by_name_type,
+        device::nm_dev_iface_type_to_nmstate, dispatch::get_dispatches,
+        dns::nm_global_dns_to_nmstate, get_description, get_lldp,
+        is_lldp_enabled, nm_802_1x_to_nmstate, nm_ip_setting_to_nmstate4,
+        nm_ip_setting_to_nmstate6, ovs::merge_ovs_netdev_tun_iface,
+        query_nmstate_wait_ip, retrieve_dns_info,
+        vpn::get_supported_vpn_ifaces,
     },
-    settings::{
-        get_bond_balance_slb, NM_SETTING_BOND_SETTING_NAME,
-        NM_SETTING_BRIDGE_SETTING_NAME, NM_SETTING_DUMMY_SETTING_NAME,
-        NM_SETTING_INFINIBAND_SETTING_NAME, NM_SETTING_LOOPBACK_SETTING_NAME,
-        NM_SETTING_MACVLAN_SETTING_NAME, NM_SETTING_OVS_BRIDGE_SETTING_NAME,
-        NM_SETTING_OVS_IFACE_SETTING_NAME, NM_SETTING_VETH_SETTING_NAME,
-        NM_SETTING_VLAN_SETTING_NAME, NM_SETTING_VRF_SETTING_NAME,
-        NM_SETTING_VXLAN_SETTING_NAME, NM_SETTING_WIRED_SETTING_NAME,
-    },
+    settings::get_bond_balance_slb,
 };
 use crate::{
     BaseInterface, BondConfig, BondInterface, BondOptions, DummyInterface,
-    EthernetInterface, InfiniBandInterface, Interface, InterfaceState,
-    InterfaceType, Interfaces, LinuxBridgeInterface, LoopbackInterface,
+    EthernetInterface, HsrInterface, InfiniBandInterface, Interface,
+    InterfaceIdentifier, InterfaceState, InterfaceType, IpVlanInterface,
+    LinuxBridgeInterface, LoopbackInterface, MacSecConfig, MacSecInterface,
     MacVlanInterface, MacVtapInterface, NetworkState, NmstateError,
     OvsBridgeInterface, OvsInterface, UnknownInterface, VlanInterface,
     VrfInterface, VxlanInterface,
 };
 
-pub(crate) fn nm_retrieve(
+pub(crate) async fn nm_retrieve(
     running_config_only: bool,
 ) -> Result<NetworkState, NmstateError> {
     let mut net_state = NetworkState::new();
-    net_state.prop_list = vec!["interfaces", "dns"];
-    let mut nm_api = NmApi::new().map_err(nm_error_to_nmstate)?;
+    let mut nm_api = NmApi::new().await.map_err(nm_error_to_nmstate)?;
     let nm_conns = nm_api
         .applied_connections_get()
+        .await
         .map_err(nm_error_to_nmstate)?;
-    let nm_devs = nm_api.devices_get().map_err(nm_error_to_nmstate)?;
+    let nm_devs = nm_api.devices_get().await.map_err(nm_error_to_nmstate)?;
 
-    let nm_saved_conns =
-        nm_api.connections_get().map_err(nm_error_to_nmstate)?;
+    let nm_saved_conns = nm_api
+        .connections_get()
+        .await
+        .map_err(nm_error_to_nmstate)?;
     let nm_acs = nm_api
         .active_connections_get()
+        .await
         .map_err(nm_error_to_nmstate)?;
 
     let nm_conns_name_type_index =
@@ -64,11 +63,23 @@ pub(crate) fn nm_retrieve(
     let nm_acs_name_type_index =
         create_index_for_nm_acs_by_name_type(nm_acs.as_slice());
 
-    let mptcp_supported = is_mptcp_supported(&nm_api);
-
     // Include disconnected interface as state:down
     // This is used for verify on `state: absent`
     for nm_dev in &nm_devs {
+        // The OVS `netdev` datapath has both ovs-interface and
+        // tun interface, we only store ovs-interface here, then
+        // `merge_ovs_netdev_tun_iface()` afterwards
+        if nm_dev.iface_type == NmIfaceType::Tun
+            && nm_devs.as_slice().iter().any(|n| {
+                n.name == nm_dev.name && n.iface_type == NmIfaceType::OvsIface
+            })
+        {
+            continue;
+        }
+        if nm_dev.name.as_str() == "ip_vti0" {
+            log::debug!("Skipping libreswan ip_vti0 interface");
+            continue;
+        }
         match nm_dev.state {
             NmDeviceState::Unmanaged | NmDeviceState::Disconnected => {
                 if let Some(iface) = nm_dev_to_nm_iface(nm_dev) {
@@ -133,23 +144,16 @@ pub(crate) fn nm_retrieve(
                         Some(
                             nm_api
                                 .device_lldp_neighbor_get(&nm_dev.obj_path)
+                                .await
                                 .map_err(nm_error_to_nmstate)?,
                         )
                     }
                 } else {
                     None
                 };
-                if let Some(mut iface) =
+                if let Some(iface) =
                     iface_get(nm_dev, nm_conn, nm_saved_conn, lldp_neighbors)
                 {
-                    // Suppress mptcp only when MPTCP is not supported by
-                    // NetworkManager, so user will not get failure when they
-                    // apply the returned state.
-                    if !mptcp_supported {
-                        iface.base_iface_mut().prop_list.push("mptcp");
-                        iface.base_iface_mut().mptcp = None;
-                    }
-
                     log::debug!(
                         "Found NM interface {}/{}",
                         iface.name(),
@@ -160,6 +164,10 @@ pub(crate) fn nm_retrieve(
             }
         }
     }
+    for iface in get_supported_vpn_ifaces(&nm_saved_conn_uuid_index, &nm_acs)? {
+        net_state.append_interface_data(iface);
+    }
+
     for iface in net_state
         .interfaces
         .kernel_ifaces
@@ -168,67 +176,55 @@ pub(crate) fn nm_retrieve(
     {
         // Do not touch interfaces nmstate does not support yet
         if !InterfaceType::SUPPORTED_LIST.contains(&iface.iface_type()) {
-            if !iface.base_iface_mut().prop_list.contains(&"state") {
-                iface.base_iface_mut().prop_list.push("state");
-            }
             iface.base_iface_mut().state = InterfaceState::Ignore;
         }
     }
-    if let Ok(nm_global_dns_conf) = nm_api
+    let mut dns_config = if let Ok(nm_global_dns_conf) = nm_api
         .get_global_dns_configuration()
+        .await
         .map_err(nm_error_to_nmstate)
     {
         if nm_global_dns_conf.is_empty() {
-            net_state.dns =
-                retrieve_dns_info(&mut nm_api, &net_state.interfaces)?;
+            retrieve_dns_info(&mut nm_api, &net_state.interfaces).await?
         } else {
-            net_state.dns = nm_global_dns_to_nmstate(&nm_global_dns_conf);
+            nm_global_dns_to_nmstate(&nm_global_dns_conf)
         }
     } else {
-        net_state.dns = retrieve_dns_info(&mut nm_api, &net_state.interfaces)?;
-    }
-    net_state.dns.sanitize().ok();
+        retrieve_dns_info(&mut nm_api, &net_state.interfaces).await?
+    };
+    dns_config.sanitize().ok();
     if running_config_only {
-        net_state.dns.running = None;
+        dns_config.running = None;
+    }
+    net_state.dns = Some(dns_config);
+
+    for (iface_name, conf) in get_dispatches().drain() {
+        if let Some(iface) =
+            net_state.interfaces.kernel_ifaces.get_mut(&iface_name)
+        {
+            iface.base_iface_mut().dispatch = Some(conf);
+        }
     }
 
-    set_ovs_iface_controller_info(&mut net_state.interfaces);
+    merge_ovs_netdev_tun_iface(&mut net_state, &nm_devs, &nm_conns);
 
     Ok(net_state)
 }
 
-fn nm_dev_iface_type_to_nmstate(nm_dev: &NmDevice) -> InterfaceType {
-    match nm_dev.iface_type.as_str() {
-        NM_SETTING_WIRED_SETTING_NAME => InterfaceType::Ethernet,
-        NM_SETTING_VETH_SETTING_NAME => InterfaceType::Ethernet,
-        NM_SETTING_BOND_SETTING_NAME => InterfaceType::Bond,
-        NM_SETTING_DUMMY_SETTING_NAME => InterfaceType::Dummy,
-        NM_SETTING_BRIDGE_SETTING_NAME => InterfaceType::LinuxBridge,
-        NM_SETTING_OVS_BRIDGE_SETTING_NAME => InterfaceType::OvsBridge,
-        NM_SETTING_OVS_IFACE_SETTING_NAME => InterfaceType::OvsInterface,
-        NM_SETTING_VRF_SETTING_NAME => InterfaceType::Vrf,
-        NM_SETTING_VLAN_SETTING_NAME => InterfaceType::Vlan,
-        NM_SETTING_VXLAN_SETTING_NAME => InterfaceType::Vxlan,
-        NM_SETTING_MACVLAN_SETTING_NAME => {
-            if nm_dev.is_mac_vtap {
-                InterfaceType::MacVtap
-            } else {
-                InterfaceType::MacVlan
-            }
-        }
-        NM_SETTING_LOOPBACK_SETTING_NAME => InterfaceType::Loopback,
-        NM_SETTING_INFINIBAND_SETTING_NAME => InterfaceType::InfiniBand,
-        _ => InterfaceType::Other(nm_dev.iface_type.to_string()),
-    }
-}
-
-fn nm_conn_to_base_iface(
-    nm_dev: &NmDevice,
+// When nm_dev is None, this function will not set interface type.
+pub(crate) fn nm_conn_to_base_iface(
+    nm_dev: Option<&NmDevice>,
     nm_conn: &NmConnection,
     nm_saved_conn: Option<&NmConnection>,
     lldp_neighbors: Option<Vec<NmLldpNeighbor>>,
 ) -> Option<BaseInterface> {
-    if let Some(iface_name) = nm_conn.iface_name() {
+    if let Some(iface_name) = nm_conn.iface_name().or_else(|| {
+        if nm_conn.iface_type() == Some(&NmIfaceType::Vpn) {
+            nm_conn.id()
+        } else {
+            None
+        }
+    }) {
         let ipv4 = nm_conn.ipv4.as_ref().map(nm_ip_setting_to_nmstate4);
         let ipv6 = nm_conn
             .ipv6
@@ -237,29 +233,25 @@ fn nm_conn_to_base_iface(
 
         let mut base_iface = BaseInterface::new();
         base_iface.name = iface_name.to_string();
-        base_iface.prop_list = vec![
-            "name",
-            "state",
-            "ipv4",
-            "ipv6",
-            "ieee8021x",
-            "description",
-            "lldp",
-            "wait_ip",
-        ];
         base_iface.state = InterfaceState::Up;
-        base_iface.iface_type = nm_dev_iface_type_to_nmstate(nm_dev);
-        if base_iface.iface_type.is_userspace() {
-            // Only override iface type for user space. For other interface,
-            // we trust nispor to set the correct interface type.
-            base_iface.prop_list.push("iface_type");
-        }
+        base_iface.iface_type = if let Some(nm_dev) = nm_dev {
+            nm_dev_iface_type_to_nmstate(nm_dev)
+        } else {
+            InterfaceType::Unknown
+        };
         base_iface.ipv4 = ipv4;
         base_iface.ipv6 = ipv6;
         base_iface.wait_ip =
             query_nmstate_wait_ip(nm_conn.ipv4.as_ref(), nm_conn.ipv6.as_ref());
-        base_iface.controller = nm_conn.controller().map(|c| c.to_string());
         base_iface.description = get_description(nm_conn);
+        (base_iface.identifier, base_iface.mac_address) =
+            get_identifier_and_mac(nm_conn);
+
+        base_iface.profile_name = get_connection_name(nm_conn, nm_saved_conn);
+        if base_iface.profile_name.as_ref() == Some(&base_iface.name) {
+            base_iface.profile_name = None;
+        }
+
         base_iface.lldp =
             Some(lldp_neighbors.map(get_lldp).unwrap_or_default());
         if let Some(nm_saved_conn) = nm_saved_conn {
@@ -280,19 +272,22 @@ fn iface_get(
     nm_saved_conn: Option<&NmConnection>,
     lldp_neighbors: Option<Vec<NmLldpNeighbor>>,
 ) -> Option<Interface> {
-    if let Some(base_iface) =
-        nm_conn_to_base_iface(nm_dev, nm_conn, nm_saved_conn, lldp_neighbors)
-    {
+    if let Some(base_iface) = nm_conn_to_base_iface(
+        Some(nm_dev),
+        nm_conn,
+        nm_saved_conn,
+        lldp_neighbors,
+    ) {
         let iface = match &base_iface.iface_type {
             InterfaceType::LinuxBridge => Interface::LinuxBridge({
                 let mut iface = LinuxBridgeInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::Ethernet => Interface::Ethernet({
                 let mut iface = EthernetInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::Bond => Interface::Bond({
                 let mut iface = BondInterface::new();
@@ -305,47 +300,82 @@ fn iface_get(
                     ..Default::default()
                 };
                 iface.bond = Some(bond_config);
-                iface
+                Box::new(iface)
             }),
             InterfaceType::OvsInterface => Interface::OvsInterface({
                 let mut iface = OvsInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::Dummy => Interface::Dummy({
                 let mut iface = DummyInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::Vlan => Interface::Vlan({
                 let mut iface = VlanInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::Vxlan => Interface::Vxlan({
                 let mut iface = VxlanInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::MacVlan => Interface::MacVlan({
                 let mut iface = MacVlanInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::MacVtap => Interface::MacVtap({
                 let mut iface = MacVtapInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::Vrf => Interface::Vrf({
                 let mut iface = VrfInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
             }),
             InterfaceType::OvsBridge => Interface::OvsBridge({
                 let mut iface = OvsBridgeInterface::new();
                 iface.base = base_iface;
-                iface
+                Box::new(iface)
+            }),
+            InterfaceType::Loopback => Interface::Loopback({
+                let mut iface = LoopbackInterface::new();
+                iface.base = base_iface;
+                Box::new(iface)
+            }),
+            InterfaceType::MacSec => Interface::MacSec({
+                let mut iface = MacSecInterface::new();
+                iface.base = base_iface;
+
+                if let Some(macsec_set) = nm_conn.macsec.as_ref() {
+                    let mut macsec_config = MacSecConfig::new();
+                    macsec_config.mka_ckn.clone_from(&macsec_set.mka_ckn);
+                    if let Some(saved_conn) = nm_saved_conn.as_ref() {
+                        if let Some(macsec_saved_set) =
+                            saved_conn.macsec.as_ref()
+                        {
+                            macsec_config
+                                .mka_cak
+                                .clone_from(&macsec_saved_set.mka_cak);
+                        }
+                    }
+                    iface.macsec = Some(macsec_config);
+                }
+                Box::new(iface)
+            }),
+            InterfaceType::Hsr => Interface::Hsr({
+                let mut iface = HsrInterface::new();
+                iface.base = base_iface;
+                Box::new(iface)
+            }),
+            InterfaceType::IpVlan => Interface::IpVlan({
+                let mut iface = IpVlanInterface::new();
+                iface.base = base_iface;
+                Box::new(iface)
             }),
             _ => {
                 log::debug!("Skip unsupported interface {:?}", base_iface);
@@ -361,17 +391,17 @@ fn iface_get(
 
 fn get_first_nm_conn<'a>(
     nm_conns_name_type_index: &'a HashMap<
-        (&'a str, &'a str),
+        (&'a str, NmIfaceType),
         Vec<&'a NmConnection>,
     >,
     name: &'a str,
-    nm_iface_type: &'a str,
+    nm_iface_type: &'a NmIfaceType,
 ) -> Option<&'a NmConnection> {
     // Treating veth as ethernet
-    let nm_iface_type = if nm_iface_type == NM_SETTING_VETH_SETTING_NAME {
-        NM_SETTING_WIRED_SETTING_NAME
+    let nm_iface_type = if nm_iface_type == &NmIfaceType::Veth {
+        NmIfaceType::Ethernet
     } else {
-        nm_iface_type
+        nm_iface_type.clone()
     };
     if let Some(nm_conns) = nm_conns_name_type_index.get(&(name, nm_iface_type))
     {
@@ -387,43 +417,21 @@ fn get_first_nm_conn<'a>(
 
 fn get_nm_ac<'a>(
     nm_acs_name_type_index: &'a HashMap<
-        (&'a str, &'a str),
+        (&'a str, NmIfaceType),
         &'a NmActiveConnection,
     >,
     name: &'a str,
-    nm_iface_type: &'a str,
+    nm_iface_type: &'a NmIfaceType,
 ) -> Option<&'a NmActiveConnection> {
     nm_acs_name_type_index
         .get(&(
             name,
             match nm_iface_type {
-                NM_SETTING_VETH_SETTING_NAME => NM_SETTING_WIRED_SETTING_NAME,
-                t => t,
+                NmIfaceType::Veth => NmIfaceType::Ethernet,
+                t => t.clone(),
             },
         ))
         .copied()
-}
-
-fn set_ovs_iface_controller_info(ifaces: &mut Interfaces) {
-    let mut pending_changes: Vec<(&str, &str)> = Vec::new();
-    for iface in ifaces.user_ifaces.values() {
-        if iface.iface_type() == InterfaceType::OvsBridge {
-            if let Some(port_names) = iface.ports() {
-                for port_name in port_names {
-                    pending_changes.push((port_name, iface.name()));
-                }
-            }
-        }
-    }
-    for (iface_name, ctrl_name) in pending_changes {
-        if let Some(ref mut iface) = ifaces.kernel_ifaces.get_mut(iface_name) {
-            iface.base_iface_mut().prop_list.push("controller");
-            iface.base_iface_mut().prop_list.push("controller_type");
-            iface.base_iface_mut().controller = Some(ctrl_name.to_string());
-            iface.base_iface_mut().controller_type =
-                Some(InterfaceType::OvsBridge);
-        }
-    }
 }
 
 fn nm_dev_to_nm_iface(nm_dev: &NmDevice) -> Option<Interface> {
@@ -431,9 +439,8 @@ fn nm_dev_to_nm_iface(nm_dev: &NmDevice) -> Option<Interface> {
     if nm_dev.name.is_empty() {
         return None;
     } else {
-        base_iface.name = nm_dev.name.clone();
+        base_iface.name.clone_from(&nm_dev.name);
     }
-    base_iface.prop_list = vec!["name", "state"];
     match nm_dev.state {
         NmDeviceState::Unmanaged => {
             if !nm_dev.real {
@@ -446,72 +453,87 @@ fn nm_dev_to_nm_iface(nm_dev: &NmDevice) -> Option<Interface> {
         _ => base_iface.state = InterfaceState::Up,
     }
     base_iface.iface_type = nm_dev_iface_type_to_nmstate(nm_dev);
-    let mut iface = match &base_iface.iface_type {
+    let iface = match &base_iface.iface_type {
         InterfaceType::Ethernet => Interface::Ethernet({
             let mut iface = EthernetInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::Dummy => Interface::Dummy({
             let mut iface = DummyInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::LinuxBridge => Interface::LinuxBridge({
             let mut iface = LinuxBridgeInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::OvsInterface => Interface::OvsInterface({
             let mut iface = OvsInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::OvsBridge => Interface::OvsBridge({
             let mut iface = OvsBridgeInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::Bond => Interface::Bond({
             let mut iface = BondInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::Vlan => Interface::Vlan({
             let mut iface = VlanInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::Vxlan => Interface::Vxlan({
             let mut iface = VxlanInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::MacVlan => Interface::MacVlan({
             let mut iface = MacVlanInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::MacVtap => Interface::MacVtap({
             let mut iface = MacVtapInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::Vrf => Interface::Vrf({
             let mut iface = VrfInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
         InterfaceType::Loopback => Interface::Loopback({
             let mut iface = LoopbackInterface::new();
             iface.base = base_iface;
-            iface
+            Box::new(iface)
         }),
-        InterfaceType::InfiniBand => Interface::InfiniBand({
+        InterfaceType::MacSec => Interface::MacSec({
+            let mut iface = MacSecInterface::new();
+            iface.base = base_iface;
+            Box::new(iface)
+        }),
+        InterfaceType::Hsr => Interface::Hsr({
+            let mut iface = HsrInterface::new();
+            iface.base = base_iface;
+            Box::new(iface)
+        }),
+        InterfaceType::InfiniBand => Interface::InfiniBand(Box::new({
             InfiniBandInterface {
                 base: base_iface,
                 ..Default::default()
             }
+        })),
+        InterfaceType::IpVlan => Interface::IpVlan({
+            let mut iface = IpVlanInterface::new();
+            iface.base = base_iface;
+            Box::new(iface)
         }),
         iface_type
             if iface_type == &InterfaceType::Other("ovs-port".to_string()) =>
@@ -535,18 +557,65 @@ fn nm_dev_to_nm_iface(nm_dev: &NmDevice) -> Option<Interface> {
                 let mut iface = LoopbackInterface::new();
                 base_iface.iface_type = InterfaceType::Loopback;
                 iface.base = base_iface;
-                Interface::Loopback(iface)
+                Interface::Loopback(Box::new(iface))
             } else {
+                // For unknown/unsupported interface,
+                // if it has MAC address, we treat it as UnknownInterface which
+                // is a kernel interface, otherwise use OtherInterface which is
+                // a user space interface.
+                if !nm_dev.mac_address.is_empty() {
+                    base_iface.iface_type = InterfaceType::Unknown;
+                }
                 let mut iface = UnknownInterface::new();
                 iface.base = base_iface;
-                Interface::Unknown(iface)
+                Interface::Unknown(Box::new(iface))
             }
         }
     };
-    if iface.iface_type().is_userspace() {
-        // Only override iface type for user space. For other interface,
-        // we trust nispor to set the correct interface type.
-        iface.base_iface_mut().prop_list.push("iface_type");
-    }
     Some(iface)
+}
+
+// If identifier is mac-address, we should override MAC address
+// queried by nispor, otherwise applying back the queried state will
+// be different for bond ports as their MAC address will change after
+// attached to bond.
+// For InterfaceIdentifier::Name, we set mac address to None.
+// TODO: Once we have dedicate section for `identifier`, we should
+//       not override runtime MAC address.
+fn get_identifier_and_mac(
+    nm_conn: &NmConnection,
+) -> (Option<InterfaceIdentifier>, Option<String>) {
+    if let Some(nm_set) = nm_conn.wired.as_ref() {
+        if let Some(mac) = nm_set.mac_address.as_deref() {
+            if !mac.is_empty() {
+                return (
+                    Some(InterfaceIdentifier::MacAddress),
+                    Some(mac.to_string()),
+                );
+            }
+        }
+    }
+
+    (Some(InterfaceIdentifier::Name), None)
+}
+
+// The applied connection will not update `connection.id` when reapply due to
+// bug: https://issues.redhat.com/browse/RHEL-59548
+// Hence we prefer saved NmConnection over active when they are pointing to the
+// same UUID.
+fn get_connection_name(
+    nm_conn: &NmConnection,
+    saved_nm_conn: Option<&NmConnection>,
+) -> Option<String> {
+    if let Some(saved_nm_conn) = saved_nm_conn.as_ref() {
+        if saved_nm_conn.uuid() == nm_conn.uuid() {
+            if let Some(nm_set) = saved_nm_conn.connection.as_ref() {
+                return nm_set.id.clone();
+            }
+        }
+    }
+    if let Some(nm_set) = nm_conn.connection.as_ref() {
+        return nm_set.id.clone();
+    }
+    None
 }

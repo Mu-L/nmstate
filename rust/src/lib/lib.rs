@@ -32,7 +32,7 @@
 //!
 //! To retrieve current network state:
 //!
-//! ```rust
+//! ```no_run
 //! use nmstate::NetworkState;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -84,6 +84,7 @@
 //! ```
 
 mod deserializer;
+mod dispatch;
 mod dns;
 mod error;
 #[cfg(feature = "gen_conf")]
@@ -99,6 +100,8 @@ mod net_state;
 #[cfg(feature = "query_apply")]
 mod nispor;
 mod nm;
+#[allow(deprecated)]
+mod ovn;
 mod ovs;
 #[cfg(feature = "query_apply")]
 mod ovsdb;
@@ -106,12 +109,17 @@ mod ovsdb;
 mod policy;
 #[cfg(feature = "query_apply")]
 mod query_apply;
+#[cfg(feature = "gen_revert")]
+mod revert;
 mod route;
 mod route_rule;
 mod serializer;
 mod state;
+#[cfg(feature = "query_apply")]
+mod statistic;
 mod unit_tests;
 
+pub use crate::dispatch::DispatchConfig;
 pub(crate) use crate::dns::MergedDnsState;
 pub use crate::dns::{DnsClientState, DnsState};
 pub use crate::error::{ErrorKind, NmstateError};
@@ -120,27 +128,32 @@ pub(crate) use crate::hostname::MergedHostNameState;
 pub use crate::ieee8021x::Ieee8021XConfig;
 pub(crate) use crate::iface::MergedInterface;
 pub use crate::iface::{
-    Interface, InterfaceState, InterfaceType, UnknownInterface,
+    Interface, InterfaceIdentifier, InterfaceState, InterfaceType,
+    UnknownInterface,
 };
 pub(crate) use crate::ifaces::MergedInterfaces;
 pub use crate::ifaces::{
     BaseInterface, BondAdSelect, BondAllPortsActive, BondArpAllTargets,
     BondArpValidate, BondConfig, BondFailOverMac, BondInterface, BondLacpRate,
-    BondMode, BondOptions, BondPrimaryReselect, BondXmitHashPolicy,
-    BridgePortTunkTag, BridgePortVlanConfig, BridgePortVlanMode,
-    BridgePortVlanRange, DummyInterface, EthernetConfig, EthernetDuplex,
-    EthernetInterface, EthtoolCoalesceConfig, EthtoolConfig,
-    EthtoolFeatureConfig, EthtoolPauseConfig, EthtoolRingConfig,
-    InfiniBandConfig, InfiniBandInterface, InfiniBandMode, Interfaces,
-    LinuxBridgeConfig, LinuxBridgeInterface, LinuxBridgeMulticastRouterType,
-    LinuxBridgeOptions, LinuxBridgePortConfig, LinuxBridgeStpOptions,
-    LoopbackInterface, MacVlanConfig, MacVlanInterface, MacVlanMode,
-    MacVtapConfig, MacVtapInterface, MacVtapMode, OvsBridgeBondConfig,
-    OvsBridgeBondMode, OvsBridgeBondPortConfig, OvsBridgeConfig,
-    OvsBridgeInterface, OvsBridgeOptions, OvsBridgePortConfig, OvsDpdkConfig,
-    OvsInterface, OvsPatchConfig, SrIovConfig, SrIovVfConfig, VethConfig,
-    VlanConfig, VlanInterface, VlanProtocol, VrfConfig, VrfInterface,
-    VxlanConfig, VxlanInterface,
+    BondMode, BondOptions, BondPortConfig, BondPrimaryReselect,
+    BondXmitHashPolicy, BridgePortTrunkTag, BridgePortVlanConfig,
+    BridgePortVlanMode, BridgePortVlanRange, DummyInterface, EthernetConfig,
+    EthernetDuplex, EthernetInterface, EthtoolCoalesceConfig, EthtoolConfig,
+    EthtoolFeatureConfig, EthtoolPauseConfig, EthtoolRingConfig, HsrConfig,
+    HsrInterface, HsrProtocol, InfiniBandConfig, InfiniBandInterface,
+    InfiniBandMode, Interfaces, IpVlanConfig, IpVlanInterface, IpVlanMode,
+    IpsecInterface, LibreswanAddressFamily, LibreswanConfig,
+    LibreswanConnectionType, LinuxBridgeConfig, LinuxBridgeInterface,
+    LinuxBridgeMulticastRouterType, LinuxBridgeOptions, LinuxBridgePortConfig,
+    LinuxBridgeStpOptions, LoopbackInterface, MacSecConfig, MacSecInterface,
+    MacSecOffload, MacSecValidate, MacVlanConfig, MacVlanInterface,
+    MacVlanMode, MacVtapConfig, MacVtapInterface, MacVtapMode,
+    OvsBridgeBondConfig, OvsBridgeBondMode, OvsBridgeBondPortConfig,
+    OvsBridgeConfig, OvsBridgeInterface, OvsBridgeOptions, OvsBridgePortConfig,
+    OvsBridgeStpOptions, OvsDpdkConfig, OvsInterface, OvsPatchConfig,
+    SrIovConfig, SrIovVfConfig, VethConfig, VlanConfig, VlanInterface,
+    VlanProtocol, VlanRegistrationProtocol, VrfConfig, VrfInterface,
+    VxlanConfig, VxlanInterface, XfrmInterface,
 };
 pub use crate::ip::{
     AddressFamily, Dhcpv4ClientId, Dhcpv6Duid, InterfaceIpAddr, InterfaceIpv4,
@@ -148,14 +161,18 @@ pub use crate::ip::{
 };
 pub use crate::lldp::{
     LldpAddressFamily, LldpChassisId, LldpChassisIdType, LldpConfig,
-    LldpMacPhyConf, LldpMaxFrameSize, LldpMgmtAddr, LldpMgmtAddrs,
-    LldpNeighborTlv, LldpPortId, LldpPortIdType, LldpPpvids,
-    LldpSystemCapabilities, LldpSystemCapability, LldpSystemDescription,
-    LldpSystemName, LldpVlan, LldpVlans,
+    LldpMacPhy, LldpMaxFrameSize, LldpMgmtAddr, LldpMgmtAddrs, LldpNeighborTlv,
+    LldpPortId, LldpPortIdType, LldpPpvids, LldpSystemCapabilities,
+    LldpSystemCapability, LldpSystemDescription, LldpSystemName, LldpVlan,
+    LldpVlans,
 };
 pub use crate::mptcp::{MptcpAddressFlag, MptcpConfig};
 pub(crate) use crate::net_state::MergedNetworkState;
 pub use crate::net_state::NetworkState;
+pub(crate) use crate::ovn::MergedOvnConfiguration;
+pub use crate::ovn::{
+    OvnBridgeMapping, OvnBridgeMappingState, OvnConfiguration,
+};
 pub(crate) use crate::ovs::MergedOvsDbGlobalConfig;
 pub use crate::ovs::{OvsDbGlobalConfig, OvsDbIfaceConfig};
 #[cfg(feature = "query_apply")]
@@ -163,8 +180,10 @@ pub use crate::policy::{
     NetworkCaptureRules, NetworkPolicy, NetworkStateTemplate,
 };
 pub(crate) use crate::route::MergedRoutes;
-pub use crate::route::{RouteEntry, RouteState, Routes};
+pub use crate::route::{RouteEntry, RouteState, RouteType, Routes};
 pub(crate) use crate::route_rule::MergedRouteRules;
 pub use crate::route_rule::{
     RouteRuleAction, RouteRuleEntry, RouteRuleState, RouteRules,
 };
+#[cfg(feature = "query_apply")]
+pub use crate::statistic::{NmstateFeature, NmstateStatistic};

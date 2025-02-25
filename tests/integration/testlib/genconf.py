@@ -7,6 +7,8 @@ import libnmstate
 from libnmstate.schema import DNS
 from libnmstate.schema import Interface
 from libnmstate.schema import InterfaceState
+from libnmstate.schema import Route
+from libnmstate.schema import RouteRule
 
 from .cmdlib import exec_cmd
 
@@ -29,7 +31,14 @@ def gen_conf_apply(desire_state):
         activate_all_nm_connections()
         yield
     finally:
-        absent_state = {DNS.KEY: {DNS.CONFIG: {}}, Interface.KEY: []}
+        absent_state = {
+            DNS.KEY: {DNS.CONFIG: {}},
+            Interface.KEY: [],
+            Route.KEY: {Route.CONFIG: [{Route.STATE: Route.STATE_ABSENT}]},
+            RouteRule.KEY: {
+                RouteRule.CONFIG: [{RouteRule.STATE: RouteRule.STATE_ABSENT}]
+            },
+        }
         for iface_name in iface_names:
             absent_state[Interface.KEY].append(
                 {
@@ -37,7 +46,7 @@ def gen_conf_apply(desire_state):
                     Interface.STATE: InterfaceState.ABSENT,
                 }
             )
-        libnmstate.apply(absent_state, verify_change=False)
+        libnmstate.apply(absent_state)
         for file_path in file_paths:
             try:
                 os.unlink(file_path)

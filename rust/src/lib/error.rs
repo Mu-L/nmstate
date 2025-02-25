@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::error::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +16,7 @@ pub enum ErrorKind {
     DependencyError,
     PolicyError,
     PermissionError,
+    SrIovVfNotFound,
 }
 
 #[cfg(feature = "query_apply")]
@@ -24,7 +27,15 @@ impl ErrorKind {
             ErrorKind::PluginFailure
                 | ErrorKind::Bug
                 | ErrorKind::VerificationError
+                | ErrorKind::SrIovVfNotFound
         )
+    }
+
+    // Indicate this error can be ignore at the final retry. This group of
+    // errors is only used for verification retry. For example waiting
+    // SR-IOV configure all the VFs
+    pub(crate) fn can_ignore(&self) -> bool {
+        matches!(self, ErrorKind::SrIovVfNotFound)
     }
 }
 
@@ -106,7 +117,7 @@ impl From<serde_json::Error> for NmstateError {
     fn from(e: serde_json::Error) -> Self {
         NmstateError::new(
             ErrorKind::InvalidArgument,
-            format!("Invalid propriety: {e}"),
+            format!("Invalid property : {e}"),
         )
     }
 }
@@ -116,15 +127,6 @@ impl From<std::net::AddrParseError> for NmstateError {
         NmstateError::new(
             ErrorKind::InvalidArgument,
             format!("Invalid IP address : {e}"),
-        )
-    }
-}
-
-impl From<ipnet::AddrParseError> for NmstateError {
-    fn from(e: ipnet::AddrParseError) -> Self {
-        NmstateError::new(
-            ErrorKind::InvalidArgument,
-            format!("Invalid IP network: {e}"),
         )
     }
 }

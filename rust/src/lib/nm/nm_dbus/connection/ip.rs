@@ -5,12 +5,13 @@ use std::convert::TryFrom;
 
 use log::warn;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::super::{
     connection::dns::{
-        nm_ip_dns_search_to_value, nm_ip_dns_to_value, parse_nm_dns,
-        parse_nm_dns_data, parse_nm_dns_search,
+        nm_ip_dns_options_to_value, nm_ip_dns_search_to_value,
+        nm_ip_dns_to_value, parse_nm_dns, parse_nm_dns_data,
+        parse_nm_dns_options, parse_nm_dns_search,
     },
     connection::route::{
         nm_ip_routes_to_value, parse_nm_ip_route_data, NmIpRoute,
@@ -18,11 +19,11 @@ use super::super::{
     connection::route_rule::{
         nm_ip_rules_to_value, parse_nm_ip_rule_data, NmIpRouteRule,
     },
-    connection::DbusDictionary,
+    connection::{DbusDictionary, DBUS_ASV_SIGNATURE},
     ErrorKind, NmError, ToDbusValue,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "zvariant::OwnedValue")]
 #[non_exhaustive]
 pub enum NmSettingIpMethod {
@@ -79,7 +80,7 @@ impl TryFrom<zvariant::OwnedValue> for NmSettingIpMethod {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(try_from = "DbusDictionary")]
 #[non_exhaustive]
 pub struct NmSettingIp {
@@ -90,6 +91,7 @@ pub struct NmSettingIp {
     pub dns_priority: Option<i32>,
     pub dns_search: Option<Vec<String>>,
     pub dns: Option<Vec<String>>,
+    pub dns_options: Option<Vec<String>>,
     pub ignore_auto_dns: Option<bool>,
     pub never_default: Option<bool>,
     pub ignore_auto_routes: Option<bool>,
@@ -109,6 +111,9 @@ pub struct NmSettingIp {
     pub dhcp_iaid: Option<String>,
     // IPv6 only
     pub token: Option<String>,
+    pub dhcp_send_hostname: Option<bool>,
+    pub dhcp_fqdn: Option<String>,
+    pub dhcp_hostname: Option<String>,
     _other: HashMap<String, zvariant::OwnedValue>,
 }
 
@@ -125,6 +130,7 @@ impl TryFrom<DbusDictionary> for NmSettingIp {
                 .unwrap_or_default(),
             dns_search: _from_map!(v, "dns-search", parse_nm_dns_search)?,
             dns_priority: _from_map!(v, "dns-priority", i32::try_from)?,
+            dns_options: _from_map!(v, "dns-options", parse_nm_dns_options)?,
             ignore_auto_dns: _from_map!(v, "ignore-auto-dns", bool::try_from)?,
             never_default: _from_map!(v, "never-default", bool::try_from)?,
             ignore_auto_routes: _from_map!(
@@ -143,6 +149,13 @@ impl TryFrom<DbusDictionary> for NmSettingIp {
             may_fail: _from_map!(v, "may-fail", bool::try_from)?,
             route_metric: _from_map!(v, "route-metric", i64::try_from)?,
             token: _from_map!(v, "token", String::try_from)?,
+            dhcp_send_hostname: _from_map!(
+                v,
+                "dhcp-send-hostname",
+                bool::try_from
+            )?,
+            dhcp_fqdn: _from_map!(v, "dhcp-fqdn", String::try_from)?,
+            dhcp_hostname: _from_map!(v, "dhcp-hostname", String::try_from)?,
             ..Default::default()
         };
 
@@ -169,9 +182,7 @@ impl ToDbusValue for NmSettingIp {
         if let Some(v) = &self.method {
             ret.insert("method", zvariant::Value::new(format!("{v}")));
         }
-        let mut addresss_data = zvariant::Array::new(
-            zvariant::Signature::from_str_unchecked("a{sv}"),
-        );
+        let mut addresss_data = zvariant::Array::new(DBUS_ASV_SIGNATURE);
         for addr_str in &self.addresses {
             let addr_str_split: Vec<&str> = addr_str.split('/').collect();
             if addr_str_split.len() != 2 {
@@ -190,8 +201,8 @@ impl ToDbusValue for NmSettingIp {
                 )
             })?;
             let mut addr_dict = zvariant::Dict::new(
-                zvariant::Signature::from_str_unchecked("s"),
-                zvariant::Signature::from_str_unchecked("v"),
+                &zvariant::Signature::Str,
+                &zvariant::Signature::Variant,
             );
             addr_dict.append(
                 zvariant::Value::new("address".to_string()),
@@ -219,6 +230,9 @@ impl ToDbusValue for NmSettingIp {
         }
         if let Some(dns_searches) = self.dns_search.as_ref() {
             ret.insert("dns-search", nm_ip_dns_search_to_value(dns_searches)?);
+        }
+        if let Some(dns_options) = self.dns_options.as_ref() {
+            ret.insert("dns-options", nm_ip_dns_options_to_value(dns_options)?);
         }
         if let Some(dns_priority) = self.dns_priority {
             ret.insert("dns-priority", zvariant::Value::new(dns_priority));
@@ -264,6 +278,15 @@ impl ToDbusValue for NmSettingIp {
         }
         if let Some(v) = &self.token {
             ret.insert("token", zvariant::Value::new(v));
+        }
+        if let Some(v) = &self.dhcp_send_hostname {
+            ret.insert("dhcp-send-hostname", zvariant::Value::new(v));
+        }
+        if let Some(v) = &self.dhcp_fqdn {
+            ret.insert("dhcp-fqdn", zvariant::Value::new(v));
+        }
+        if let Some(v) = &self.dhcp_hostname {
+            ret.insert("dhcp-hostname", zvariant::Value::new(v));
         }
         ret.extend(self._other.iter().map(|(key, value)| {
             (key.as_str(), zvariant::Value::from(value.clone()))

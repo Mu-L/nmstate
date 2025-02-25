@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryFrom;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
@@ -68,7 +67,7 @@ where
 {
     struct IntegerOrString(PhantomData<fn() -> Option<bool>>);
 
-    impl<'de> Visitor<'de> for IntegerOrString {
+    impl Visitor<'_> for IntegerOrString {
         type Value = Option<bool>;
 
         fn expecting(
@@ -180,7 +179,7 @@ where
 {
     struct IntegerOrString(PhantomData<fn() -> Option<u64>>);
 
-    impl<'de> Visitor<'de> for IntegerOrString {
+    impl Visitor<'_> for IntegerOrString {
         type Value = Option<u64>;
 
         fn expecting(
@@ -216,6 +215,24 @@ where
     deserializer.deserialize_any(IntegerOrString(PhantomData))
 }
 
+pub(crate) fn option_i32_or_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    option_i64_or_string(deserializer).and_then(|i| {
+        if let Some(i) = i {
+            match i32::try_from(i) {
+                Ok(i) => Ok(Some(i)),
+                Err(e) => Err(de::Error::custom(e)),
+            }
+        } else {
+            Ok(None)
+        }
+    })
+}
+
 pub(crate) fn option_i64_or_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<i64>, D::Error>
@@ -224,7 +241,7 @@ where
 {
     struct IntegerOrString(PhantomData<fn() -> Option<i64>>);
 
-    impl<'de> Visitor<'de> for IntegerOrString {
+    impl Visitor<'_> for IntegerOrString {
         type Value = Option<i64>;
 
         fn expecting(

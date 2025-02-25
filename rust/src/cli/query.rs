@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use nmstate::{
-    DnsState, HostNameState, NetworkState, OvsDbGlobalConfig, RouteRules,
-    Routes,
+    DnsState, HostNameState, NetworkState, OvnConfiguration, OvsDbGlobalConfig,
+    RouteRules, Routes,
 };
 use serde::Serialize;
 use serde_yaml::Value;
@@ -13,14 +13,18 @@ use crate::error::CliError;
 pub(crate) struct SortedNetworkState {
     #[serde(skip_serializing_if = "Option::is_none")]
     hostname: Option<HostNameState>,
-    #[serde(rename = "dns-resolver", default)]
-    dns: DnsState,
+    #[serde(rename = "dns-resolver", skip_serializing_if = "Option::is_none")]
+    dns: Option<DnsState>,
     #[serde(rename = "route-rules", default)]
     rules: RouteRules,
     routes: Routes,
     interfaces: Vec<Value>,
-    #[serde(rename = "ovs-db")]
-    ovsdb: OvsDbGlobalConfig,
+    #[serde(rename = "ovs-db", skip_serializing_if = "Option::is_none")]
+    ovsdb: Option<OvsDbGlobalConfig>,
+    #[serde(rename = "ovn")]
+    ovn: OvnConfiguration,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    description: String,
 }
 
 const IFACE_TOP_PRIORTIES: [&str; 2] = ["name", "type"];
@@ -64,7 +68,7 @@ pub(crate) fn sort_netstate(
                 let mut new_iface = serde_yaml::Mapping::new();
                 for top_property in &IFACE_TOP_PRIORTIES {
                     if let Some(v) =
-                        iface.get(&Value::String(top_property.to_string()))
+                        iface.get(Value::String(top_property.to_string()))
                     {
                         new_iface.insert(
                             Value::String(top_property.to_string()),
@@ -91,6 +95,8 @@ pub(crate) fn sort_netstate(
             rules: net_state.rules,
             dns: net_state.dns,
             ovsdb: net_state.ovsdb,
+            ovn: net_state.ovn,
+            description: net_state.description,
         });
     }
 
@@ -101,6 +107,8 @@ pub(crate) fn sort_netstate(
         rules: net_state.rules,
         dns: net_state.dns,
         ovsdb: net_state.ovsdb,
+        ovn: net_state.ovn,
+        description: net_state.description,
     })
 }
 

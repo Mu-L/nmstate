@@ -6,12 +6,36 @@ use crate::{
 };
 
 impl Interface {
-    pub(crate) fn verify(&self, current: &Self) -> Result<(), NmstateError> {
+    // This function will clean up post-apply current state before verification
+    pub(crate) fn sanitize_current_for_verify(&mut self) {
+        self.base_iface_mut().sanitize_current_for_verify();
+        if let Interface::LinuxBridge(iface) = self {
+            iface.sanitize_current_for_verify()
+        }
+        if let Interface::OvsBridge(iface) = self {
+            iface.sanitize_current_for_verify()
+        }
+    }
+
+    // This function will clean up desired state before verification
+    pub(crate) fn sanitize_desired_for_verify(&mut self) {
+        self.base_iface_mut().sanitize_desired_for_verify();
+        if let Interface::Ethernet(iface) = self {
+            iface.sanitize_desired_for_verify();
+        } else if let Interface::Hsr(iface) = self {
+            iface.sanitize_desired_for_verify();
+        }
+    }
+
+    pub(crate) fn verify(
+        &mut self,
+        current: &Self,
+    ) -> Result<(), NmstateError> {
         let mut current = current.clone();
         self.process_allow_extra_address(&mut current);
 
-        let self_value = serde_json::to_value(self)?;
-        let current_value = serde_json::to_value(&current)?;
+        let self_value = serde_json::to_value(self.clone())?;
+        let current_value = serde_json::to_value(current.clone())?;
 
         if let Some((reference, desire, current)) = get_json_value_difference(
             format!("{}.interface", self.name()),
@@ -187,13 +211,62 @@ impl Interface {
                     );
                 }
             }
-            Self::Unknown(_) | Self::Dummy(_) | Self::Loopback(_) => (),
+            Self::MacSec(iface) => {
+                if let Self::MacSec(other_iface) = other {
+                    iface.update_macsec(other_iface);
+                } else {
+                    log::warn!(
+                        "Don't know how to update iface {:?} with {:?}",
+                        iface,
+                        other
+                    );
+                }
+            }
+            Self::Hsr(iface) => {
+                if let Self::Hsr(other_iface) = other {
+                    iface.update_hsr(other_iface);
+                } else {
+                    log::warn!(
+                        "Don't know how to update iface {:?} with {:?}",
+                        iface,
+                        other
+                    );
+                }
+            }
+            Self::Ipsec(iface) => {
+                if let Self::Ipsec(other_iface) = other {
+                    iface.update_ipsec(other_iface);
+                } else {
+                    log::warn!(
+                        "Don't know how to update iface {:?} with {:?}",
+                        iface,
+                        other
+                    );
+                }
+            }
+            Self::IpVlan(iface) => {
+                if let Self::IpVlan(other_iface) = other {
+                    iface.update_ipvlan(other_iface);
+                } else {
+                    log::warn!(
+                        "Don't know how to update iface {:?} with {:?}",
+                        iface,
+                        other
+                    );
+                }
+            }
+            _ => (),
         }
+    }
+
+    pub(crate) fn include_diff_context(&mut self, current: &Self) {
+        self.base_iface_mut()
+            .include_diff_context(current.base_iface());
     }
 }
 
 impl InterfaceType {
-    pub(crate) const SUPPORTED_LIST: [InterfaceType; 14] = [
+    pub(crate) const SUPPORTED_LIST: [InterfaceType; 19] = [
         InterfaceType::Bond,
         InterfaceType::LinuxBridge,
         InterfaceType::Dummy,
@@ -207,6 +280,11 @@ impl InterfaceType {
         InterfaceType::Vxlan,
         InterfaceType::InfiniBand,
         InterfaceType::Loopback,
+        InterfaceType::MacSec,
         InterfaceType::Vrf,
+        InterfaceType::Hsr,
+        InterfaceType::Ipsec,
+        InterfaceType::Xfrm,
+        InterfaceType::IpVlan,
     ];
 }

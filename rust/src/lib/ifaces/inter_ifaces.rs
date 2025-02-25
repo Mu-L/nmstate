@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::iter::FromIterator;
 
 use serde::{
     ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer,
 };
 
 use crate::{
-    ErrorKind, EthernetInterface, Interface, InterfaceState, InterfaceType,
-    MergedInterface, NmstateError,
+    ErrorKind, EthernetInterface, Interface, InterfaceIdentifier,
+    InterfaceState, InterfaceType, MergedInterface, NmstateError,
 };
 
 // The max loop count for Interfaces.set_ifaces_up_priority()
@@ -24,14 +23,14 @@ const COPY_MAC_ALLOWED_IFACE_TYPES: [InterfaceType; 3] = [
     InterfaceType::OvsInterface,
 ];
 
+/// Represent a list of [Interface].
+///
+/// With special [serde::Deserializer] and [serde::Serializer].  When applying
+/// complex nested interface(e.g. bridge over bond over vlan of eth1), the
+/// supported maximum nest level is 4 like previous example.  For 5+ nested
+/// level, you need to place controller interface before its ports.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-/// Represent a list of [Interface] with special [serde::Deserializer] and
-/// [serde::Serializer].
-/// When applying complex nested interface(e.g. bridge over bond over vlan of
-/// eth1), the supported maximum nest level is 4 like previous example.
-/// For 5+ nested level, you need to place controller interface before its
-/// ports.
 pub struct Interfaces {
     pub(crate) kernel_ifaces: HashMap<String, Interface>,
     pub(crate) user_ifaces: HashMap<(String, InterfaceType), Interface>,
@@ -96,7 +95,7 @@ impl Interfaces {
         ifaces
     }
 
-    /// Search interface base on interface name and interface type.
+    /// Search interface based on interface name and interface type.
     /// When using [InterfaceType::Unknown], we only search kernel
     /// interface(which has presentation in kernel space).
     pub fn get_iface<'a>(
@@ -105,7 +104,7 @@ impl Interfaces {
         iface_type: InterfaceType,
     ) -> Option<&'a Interface> {
         if iface_type == InterfaceType::Unknown {
-            self.kernel_ifaces.get(&iface_name.to_string()).or_else(|| {
+            self.kernel_ifaces.get(iface_name).or_else(|| {
                 self.user_ifaces
                     .values()
                     .find(|&iface| iface.name() == iface_name)
@@ -113,35 +112,33 @@ impl Interfaces {
         } else if iface_type.is_userspace() {
             self.user_ifaces.get(&(iface_name.to_string(), iface_type))
         } else {
-            self.kernel_ifaces.get(&iface_name.to_string())
+            self.kernel_ifaces.get(iface_name)
         }
     }
 
-    fn remove_iface(
+    pub fn remove_iface(
         &mut self,
         iface_name: &str,
         iface_type: InterfaceType,
     ) -> Option<Interface> {
         if iface_type == InterfaceType::Unknown {
-            self.kernel_ifaces
-                .remove(&iface_name.to_string())
-                .or_else(|| {
-                    if let Some((n, t)) = self
-                        .user_ifaces
-                        .keys()
-                        .cloned()
-                        .find(|(i, _)| i == iface_name)
-                    {
-                        self.user_ifaces.remove(&(n, t))
-                    } else {
-                        None
-                    }
-                })
+            self.kernel_ifaces.remove(iface_name).or_else(|| {
+                if let Some((n, t)) = self
+                    .user_ifaces
+                    .keys()
+                    .find(|&(i, _)| i == iface_name)
+                    .cloned()
+                {
+                    self.user_ifaces.remove(&(n, t))
+                } else {
+                    None
+                }
+            })
         } else if iface_type.is_userspace() {
             self.user_ifaces
                 .remove(&(iface_name.to_string(), iface_type))
         } else {
-            self.kernel_ifaces.remove(&iface_name.to_string())
+            self.kernel_ifaces.remove(iface_name)
         }
     }
 
@@ -158,8 +155,20 @@ impl Interfaces {
     }
 
     pub(crate) fn hide_secrets(&mut self) {
-        for iface in self.kernel_ifaces.values_mut() {
+        for iface in self
+            .kernel_ifaces
+            .values_mut()
+            .chain(self.user_ifaces.values_mut())
+        {
             iface.base_iface_mut().hide_secrets();
+            if let Interface::MacSec(macsec_iface) = iface {
+                if let Some(macsec_conf) = macsec_iface.macsec.as_mut() {
+                    macsec_conf.hide_secrets();
+                }
+            }
+            if let Interface::Ipsec(ipsec_iface) = iface {
+                ipsec_iface.hide_secrets();
+            }
         }
     }
 
@@ -346,6 +355,167 @@ impl Interfaces {
         Ok(())
     }
 
+    // If any desired interface has `identifier: mac-address`:
+    //  * Resolve interface.name to MAC address match interface name.
+    //  * Store interface.name to interface.profile_name.
+    fn resolve_mac_identifider_in_desired(
+        &mut self,
+        current: &Self,
+    ) -> Result<(), NmstateError> {
+        let mut changed_ifaces: Vec<Interface> = Vec::new();
+        for iface in self.iter().filter(|i| {
+            i.base_iface().identifier == Some(InterfaceIdentifier::MacAddress)
+                && i.base_iface().profile_name.is_none()
+        }) {
+            let mac_address = match iface.base_iface().mac_address.as_deref() {
+                Some(m) => m.to_ascii_uppercase(),
+                None => {
+                    return Err(NmstateError::new(
+                        ErrorKind::InvalidArgument,
+                        format!(
+                            "Desired interface {} has \
+                            `identifier: mac-address` but not MAC address \
+                            defined",
+                            iface.name()
+                        ),
+                    ));
+                }
+            };
+            let mut has_match = false;
+            // If `permanent_mac_address` got no matches, fallback to
+            // `mac_address`
+            for use_permanent_addr in [true, false] {
+                for cur_iface in current.kernel_ifaces.values() {
+                    if iface.iface_type() != InterfaceType::Unknown
+                        && iface.iface_type() != cur_iface.iface_type()
+                    {
+                        continue;
+                    }
+                    let cur_mac_addr = if use_permanent_addr {
+                        cur_iface
+                            .base_iface()
+                            .permanent_mac_address
+                            .as_deref()
+                            .map(|m| m.to_ascii_uppercase())
+                    } else {
+                        cur_iface
+                            .base_iface()
+                            .mac_address
+                            .as_deref()
+                            .map(|m| m.to_ascii_uppercase())
+                    };
+                    if cur_mac_addr.as_deref() == Some(&mac_address) {
+                        let mut new_iface = if iface.iface_type()
+                            == InterfaceType::Unknown
+                        {
+                            let mut new_iface_value =
+                                serde_json::to_value(iface)?;
+                            if let Some(obj) = new_iface_value.as_object_mut() {
+                                obj.insert(
+                                    "type".to_string(),
+                                    serde_json::Value::String(
+                                        cur_iface.iface_type().to_string(),
+                                    ),
+                                );
+                            }
+                            Interface::deserialize(new_iface_value)?
+                        } else {
+                            iface.clone()
+                        };
+                        new_iface.base_iface_mut().profile_name =
+                            Some(iface.base_iface().name.clone());
+                        new_iface.base_iface_mut().name =
+                            cur_iface.name().to_string();
+                        changed_ifaces.push(new_iface);
+                        has_match = true;
+                        break;
+                    }
+                }
+                if has_match {
+                    break;
+                }
+            }
+
+            if !has_match {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    format!(
+                        "Desired interface {} has `identifier: mac-address` \
+                    with MAC address {mac_address}, but no interface is \
+                    holding that MAC address",
+                        iface.name()
+                    ),
+                ));
+            }
+        }
+        for changed_iface in changed_ifaces {
+            if let Some(profile_name) =
+                changed_iface.base_iface().profile_name.as_deref()
+            {
+                self.kernel_ifaces.remove(profile_name);
+            }
+            self.push(changed_iface);
+        }
+        Ok(())
+    }
+
+    // If any desired interface is referring to a mac-based current interface:
+    //  * Resolve interface.name to MAC address match interface name.
+    //  * Store interface.name to interface.profile_name(if not define).
+    fn resolve_mac_identifider_in_current(
+        &mut self,
+        current: &Self,
+    ) -> Result<(), NmstateError> {
+        let mut changed_ifaces: Vec<Interface> = Vec::new();
+        for cur_iface in current.kernel_ifaces.values().filter(|i| {
+            i.base_iface().identifier == Some(InterfaceIdentifier::MacAddress)
+        }) {
+            if let Some(profile_name) =
+                cur_iface.base_iface().profile_name.as_ref()
+            {
+                if let Some(des_iface) = self.kernel_ifaces.get(profile_name) {
+                    let mut new_iface =
+                        if des_iface.iface_type() == InterfaceType::Unknown {
+                            let mut new_iface_value =
+                                serde_json::to_value(des_iface)?;
+                            if let Some(obj) = new_iface_value.as_object_mut() {
+                                obj.insert(
+                                    "type".to_string(),
+                                    serde_json::Value::String(
+                                        cur_iface.iface_type().to_string(),
+                                    ),
+                                );
+                            }
+                            Interface::deserialize(new_iface_value)?
+                        } else {
+                            des_iface.clone()
+                        };
+
+                    new_iface.base_iface_mut().identifier =
+                        Some(InterfaceIdentifier::MacAddress);
+                    new_iface
+                        .base_iface_mut()
+                        .mac_address
+                        .clone_from(&cur_iface.base_iface().mac_address);
+                    new_iface.base_iface_mut().name =
+                        cur_iface.name().to_string();
+                    new_iface.base_iface_mut().profile_name =
+                        Some(profile_name.to_string());
+                    changed_ifaces.push(new_iface);
+                }
+            }
+        }
+        for changed_iface in changed_ifaces {
+            if let Some(profile_name) =
+                changed_iface.base_iface().profile_name.as_deref()
+            {
+                self.kernel_ifaces.remove(profile_name);
+            }
+            self.push(changed_iface);
+        }
+        Ok(())
+    }
+
     pub(crate) fn get_iface_mut<'a>(
         &'a mut self,
         iface_name: &str,
@@ -355,7 +525,7 @@ impl Interfaces {
             self.user_ifaces
                 .get_mut(&(iface_name.to_string(), iface_type))
         } else {
-            self.kernel_ifaces.get_mut(&iface_name.to_string())
+            self.kernel_ifaces.get_mut(iface_name)
         }
     }
 
@@ -374,10 +544,10 @@ impl Interfaces {
         }
         for iface_name in iface_names_to_add {
             let mut iface = EthernetInterface::default();
-            iface.base.name = iface_name.clone();
+            iface.base.name.clone_from(&iface_name);
             log::warn!("Assuming undefined port {} as ethernet", iface_name);
             self.kernel_ifaces
-                .insert(iface_name, Interface::Ethernet(iface));
+                .insert(iface_name, Interface::Ethernet(Box::new(iface)));
         }
     }
 
@@ -385,13 +555,13 @@ impl Interfaces {
         &mut self,
     ) -> Result<(), NmstateError> {
         let mut new_ifaces = Vec::new();
-        for iface in self.kernel_ifaces.values_mut() {
-            if let Interface::Unknown(iface) = iface {
+        for iface in self.kernel_ifaces.values() {
+            if let Interface::Unknown(iface) = &iface {
                 log::warn!(
                     "Setting unknown type interface {} to ethernet",
                     iface.base.name.as_str()
                 );
-                let iface_value = match serde_json::to_value(&iface) {
+                let iface_value = match serde_json::to_value(iface) {
                     Ok(mut v) => {
                         if let Some(v) = v.as_object_mut() {
                             v.insert(
@@ -407,8 +577,8 @@ impl Interfaces {
                         return Err(NmstateError::new(
                             ErrorKind::Bug,
                             format!(
-                                "BUG: Failed to convert {iface:?} to serde_json \
-                                value: {e}"
+                                "BUG: Failed to convert {iface:?} to \
+                                serde_json value: {e}"
                             ),
                         ));
                     }
@@ -429,10 +599,19 @@ impl Interfaces {
         for iface in new_ifaces {
             self.kernel_ifaces.insert(
                 iface.base.name.to_string(),
-                Interface::Ethernet(iface),
+                Interface::Ethernet(Box::new(iface)),
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn clone_name_type_only(&self) -> Self {
+        let mut ret = Self::new();
+
+        for iface in self.to_vec() {
+            ret.push(iface.clone_name_type_only())
+        }
+        ret
     }
 }
 
@@ -484,11 +663,17 @@ impl MergedInterfaces {
             MergedInterface,
         > = HashMap::new();
 
+        desired.unify_veth_and_eth();
+        current.unify_veth_and_eth();
+
         if gen_conf_mode {
             desired.set_unknown_iface_to_eth()?;
             desired.set_missing_port_to_eth();
         } else {
+            desired.resolve_sriov_reference(&current)?;
+            desired.resolve_mac_identifider_in_current(&current)?;
             desired.resolve_unknown_ifaces(&current)?;
+            desired.resolve_mac_identifider_in_desired(&current)?;
         }
 
         desired.auto_managed_controller_ports(&current);
@@ -506,11 +691,6 @@ impl MergedInterfaces {
 
         desired.remove_ignored_ifaces(ignored_ifaces.as_slice());
         current.remove_ignored_ifaces(ignored_ifaces.as_slice());
-
-        desired.unify_veth_and_eth();
-        current.unify_veth_and_eth();
-
-        desired.resolve_sriov_reference(&current)?;
 
         for (iface_name, des_iface) in desired
             .kernel_ifaces
@@ -580,7 +760,7 @@ impl MergedInterfaces {
         iface_type: InterfaceType,
     ) -> Option<&'a MergedInterface> {
         if iface_type == InterfaceType::Unknown {
-            self.kernel_ifaces.get(&iface_name.to_string()).or_else(|| {
+            self.kernel_ifaces.get(iface_name).or_else(|| {
                 self.user_ifaces
                     .values()
                     .find(|&iface| iface.merged.name() == iface_name)
@@ -588,7 +768,7 @@ impl MergedInterfaces {
         } else if iface_type.is_userspace() {
             self.user_ifaces.get(&(iface_name.to_string(), iface_type))
         } else {
-            self.kernel_ifaces.get(&iface_name.to_string())
+            self.kernel_ifaces.get(iface_name)
         }
     }
 
@@ -596,10 +776,21 @@ impl MergedInterfaces {
         self.user_ifaces.values().chain(self.kernel_ifaces.values())
     }
 
+    pub(crate) fn iter_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut MergedInterface> {
+        self.user_ifaces
+            .values_mut()
+            .chain(self.kernel_ifaces.values_mut())
+    }
+
     // Contains all the smart modifications, validations among interfaces
     fn process(&mut self) -> Result<(), NmstateError> {
+        self.process_allow_extra_ovs_patch_ports_for_apply();
         self.apply_copy_mac_from()?;
         self.validate_controller_and_port_list_confliction()?;
+        self.resolve_port_name_ref()?;
+        self.resolve_parent_name_ref()?;
         self.handle_changed_ports()?;
         self.resolve_port_iface_controller_type()?;
         self._set_up_priority()?;
@@ -607,6 +798,7 @@ impl MergedInterfaces {
         self.check_infiniband_as_ports()?;
         self.mark_orphan_interface_as_absent()?;
         self.process_veth_peer_changes()?;
+        self.validate_dispatch_script_has_no_checkpoint()?;
         for iface in self
             .kernel_ifaces
             .values_mut()
@@ -758,6 +950,70 @@ impl MergedInterfaces {
         }
         Ok(())
     }
+
+    // Use kernel interface name first, then fallback to profile name
+    // Raise error when referring to a profile name has multiple interfaces.
+    fn resolve_parent_name_ref(&mut self) -> Result<(), NmstateError> {
+        let iface_name_search = InterfaceNameSearch::new(self);
+
+        for iface in self.iter_mut() {
+            let des_iface = if let Some(d) = iface.desired.as_mut() {
+                d
+            } else {
+                continue;
+            };
+            if !des_iface.is_up() {
+                continue;
+            }
+            let parent = if let Some(p) = des_iface.parent() {
+                p
+            } else {
+                continue;
+            };
+
+            let for_apply = if let Some(i) = iface.for_apply.as_mut() {
+                i
+            } else {
+                continue;
+            };
+            let for_verify = if let Some(i) = iface.for_verify.as_mut() {
+                i
+            } else {
+                continue;
+            };
+
+            let kernel_names = iface_name_search.get(parent);
+
+            // Prefer kernel name as port name
+            if kernel_names.contains(&parent) {
+                continue;
+            }
+            if kernel_names.len() > 1 {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    format!(
+                        "Interface {} ({}) defined with parent {} \
+                        but multiple interfaces are sharing the \
+                        this profile name",
+                        des_iface.name(),
+                        des_iface.iface_type(),
+                        parent,
+                    ),
+                ));
+            } else if let Some(kernel_name) = kernel_names.first() {
+                des_iface.change_parent_name(kernel_name);
+                for_apply.change_parent_name(kernel_name);
+                for_verify.change_parent_name(kernel_name);
+            } else {
+                // This function is not responsible to validate whether
+                // port interface exists or not. For example,
+                // gen_diff() do not need to validate whether interface
+                // exist or not.
+                // Please do not raise error here.
+            }
+        }
+        Ok(())
+    }
 }
 
 // Special cases:
@@ -816,4 +1072,68 @@ fn get_ignored_ifaces(
     }
 
     ignored_ifaces
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct InterfaceNameSearch {
+    kernel_nics: HashSet<String>,
+    profile_2_kernel: HashMap<String, Vec<String>>,
+}
+
+impl InterfaceNameSearch {
+    pub(crate) fn new(merged_ifaces: &MergedInterfaces) -> Self {
+        let mut kernel_nics: HashSet<String> = HashSet::new();
+
+        for iface in merged_ifaces
+            .kernel_ifaces
+            .values()
+            .filter(|i| i.merged.is_up())
+        {
+            if let Some(cur_iface) = iface.current.as_ref() {
+                // Existing kernel interface
+                kernel_nics.insert(cur_iface.name().to_string());
+            } else if let Some(des_iface) = iface.desired.as_ref() {
+                // Creating new kernel interface
+                if des_iface.base_iface().identifier.as_ref()
+                    != Some(&InterfaceIdentifier::MacAddress)
+                {
+                    kernel_nics.insert(des_iface.name().to_string());
+                }
+            }
+        }
+
+        let mut profile_2_kernel: HashMap<String, Vec<String>> = HashMap::new();
+        for iface in merged_ifaces.kernel_ifaces.values() {
+            let base_iface = iface.merged.base_iface();
+            if let Some(profile_name) = base_iface.profile_name.as_deref() {
+                if profile_name != base_iface.name.as_str() {
+                    profile_2_kernel
+                        .entry(profile_name.to_string())
+                        .or_default()
+                        .push(base_iface.name.to_string());
+                }
+            }
+        }
+
+        Self {
+            kernel_nics,
+            profile_2_kernel,
+        }
+    }
+
+    /// Search interface kernel name by specified name.
+    /// If any kernel interface name matches with specified, return it
+    /// Vec with that interface name only.
+    /// If no kernel interface name found, search by profile name.
+    /// Because profile name can be duplicate among interfaces,
+    /// return Vec<&str> will contains all matches.
+    pub(crate) fn get<'a>(&'a self, name: &str) -> Vec<&'a str> {
+        if let Some(n) = self.kernel_nics.get(name) {
+            vec![n]
+        } else if let Some(nics) = self.profile_2_kernel.get(name) {
+            nics.as_slice().iter().map(|s| s.as_str()).collect()
+        } else {
+            Vec::new()
+        }
+    }
 }

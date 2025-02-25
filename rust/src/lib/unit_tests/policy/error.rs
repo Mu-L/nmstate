@@ -180,7 +180,6 @@ fn test_policy_equal_got_2_values() {
     let result = NetworkCaptureCommand::parse(line);
     assert!(result.is_err());
     if let Err(e) = result {
-        println!("HAHA {e}");
         assert_eq!(e.kind(), ErrorKind::PolicyError);
         assert_eq!(e.line(), line);
         assert_eq!(e.position(), "interface.name == \"e".len() - 1);
@@ -375,9 +374,9 @@ fn test_policy_reference_capture_concatenate_with_prefix() {
     capture_results.insert(
         "void".to_string(),
         serde_yaml::from_str(
-            r#"
+            r"
             interfaces:
-              - name: eth1"#,
+              - name: eth1",
         )
         .unwrap(),
     );
@@ -399,9 +398,9 @@ fn test_policy_reference_capture_property_not_found() {
     capture_results.insert(
         "void".to_string(),
         serde_yaml::from_str(
-            r#"
+            r"
             interfaces:
-              - name: eth1"#,
+              - name: eth1",
         )
         .unwrap(),
     );
@@ -426,9 +425,9 @@ fn test_policy_reference_capture_property_not_array() {
     capture_results.insert(
         "void".to_string(),
         serde_yaml::from_str(
-            r#"
+            r"
             interfaces:
-              - name: eth1"#,
+              - name: eth1",
         )
         .unwrap(),
     );
@@ -447,7 +446,6 @@ fn test_policy_ilegal_char() {
     let result = NetworkCaptureCommand::parse(line);
     assert!(result.is_err());
     if let Err(e) = result {
-        println!("HAHA {e}");
         assert_eq!(e.kind(), ErrorKind::PolicyError);
         assert_eq!(e.line(), line);
         assert_eq!(e.position(), "capture.abc | interface.name==-".len() - 1);

@@ -2,39 +2,23 @@
 
 use std::collections::{hash_map::Entry, HashMap};
 
+use super::super::error::nm_error_to_nmstate;
 use super::super::nm_dbus::{
-    NmActiveConnection, NmApi, NmConnection, NmSettingsConnectionFlag,
-};
-use super::super::{
-    error::nm_error_to_nmstate,
-    settings::{
-        NM_SETTING_BOND_SETTING_NAME, NM_SETTING_BRIDGE_SETTING_NAME,
-        NM_SETTING_OVS_BRIDGE_SETTING_NAME, NM_SETTING_OVS_PORT_SETTING_NAME,
-        NM_SETTING_VETH_SETTING_NAME, NM_SETTING_VRF_SETTING_NAME,
-        NM_SETTING_WIRED_SETTING_NAME,
-    },
+    self, NmApi, NmConnection, NmIfaceType, NmSettingsConnectionFlag,
 };
 
-use crate::NmstateError;
+use crate::{ErrorKind, NmstateError};
 
 const ACTIVATION_RETRY_COUNT: usize = 6;
 const ACTIVATION_RETRY_INTERVAL: u64 = 1;
 
-pub(crate) const NM_SETTING_CONTROLLERS: [&str; 5] = [
-    NM_SETTING_BOND_SETTING_NAME,
-    NM_SETTING_BRIDGE_SETTING_NAME,
-    NM_SETTING_OVS_BRIDGE_SETTING_NAME,
-    NM_SETTING_OVS_PORT_SETTING_NAME,
-    NM_SETTING_VRF_SETTING_NAME,
-];
-
-pub(crate) fn delete_exist_profiles(
-    nm_api: &mut NmApi,
+pub(crate) async fn delete_exist_profiles(
+    nm_api: &mut NmApi<'_>,
     exist_nm_conns: &[NmConnection],
     nm_conns: &[NmConnection],
 ) -> Result<(), NmstateError> {
     let mut excluded_uuids: Vec<&str> = Vec::new();
-    let mut changed_iface_name_types: Vec<(&str, &str)> = Vec::new();
+    let mut changed_iface_name_types: Vec<(&str, NmIfaceType)> = Vec::new();
     let mut uuids_to_delete = Vec::new();
     for nm_conn in nm_conns {
         if let Some(uuid) = nm_conn.uuid() {
@@ -42,7 +26,12 @@ pub(crate) fn delete_exist_profiles(
         }
         if let Some(name) = nm_conn.iface_name() {
             if let Some(nm_iface_type) = nm_conn.iface_type() {
-                changed_iface_name_types.push((name, nm_iface_type));
+                changed_iface_name_types.push((name, nm_iface_type.clone()));
+            }
+        } else if nm_conn.iface_type() == Some(&NmIfaceType::Vpn) {
+            if let Some(name) = nm_conn.id() {
+                // For VPN, the we use connection id
+                changed_iface_name_types.push((name, NmIfaceType::Vpn));
             }
         }
     }
@@ -54,6 +43,12 @@ pub(crate) fn delete_exist_profiles(
         };
         let iface_name = if let Some(i) = exist_nm_conn.iface_name() {
             i
+        } else if exist_nm_conn.iface_type() == Some(&NmIfaceType::Vpn) {
+            if let Some(i) = exist_nm_conn.id() {
+                i
+            } else {
+                continue;
+            }
         } else {
             continue;
         };
@@ -71,60 +66,69 @@ pub(crate) fn delete_exist_profiles(
             continue;
         }
         if !excluded_uuids.contains(&uuid)
-            && changed_iface_name_types.contains(&(iface_name, nm_iface_type))
+            && changed_iface_name_types
+                .contains(&(iface_name, nm_iface_type.clone()))
         {
             if let Some(uuid) = exist_nm_conn.uuid() {
                 uuids_to_delete.push(uuid);
                 log::info!(
-                    "Deleting existing connection \
-                UUID {}, id {:?} type {:?} name {:?}",
+                    "Deleting existing duplicate connection {}: {}/{}",
                     uuid,
-                    exist_nm_conn.id(),
-                    exist_nm_conn.iface_type(),
-                    exist_nm_conn.iface_name(),
+                    iface_name,
+                    nm_iface_type,
                 );
             }
         }
     }
-    delete_profiles(nm_api, &uuids_to_delete)
+    delete_profiles(nm_api, &uuids_to_delete).await
 }
 
-pub(crate) fn save_nm_profiles(
-    nm_api: &mut NmApi,
+pub(crate) async fn save_nm_profiles(
+    nm_api: &mut NmApi<'_>,
     nm_conns: &[NmConnection],
     memory_only: bool,
 ) -> Result<(), NmstateError> {
     for nm_conn in nm_conns {
+        let uuid = nm_conn.uuid().unwrap_or_default();
+        let nm_iface_type = nm_conn.iface_type().cloned().unwrap_or_default();
+        // For MAC identifier interface, it does not have interface name
+        // in NM connection, print connection id instead.
+        let iface_name = nm_conn
+            .iface_name()
+            .or_else(|| nm_conn.id())
+            .unwrap_or("undefined");
         if nm_conn.obj_path.is_empty() {
             log::info!(
-                "Creating connection UUID {:?}, ID {:?}, type {:?} name {:?}",
-                nm_conn.uuid(),
-                nm_conn.id(),
-                nm_conn.iface_type(),
-                nm_conn.iface_name(),
+                "Creating connection {}: {}/{}",
+                uuid,
+                iface_name,
+                nm_iface_type
             );
         } else {
             log::info!(
-                "Modifying connection UUID {:?}, ID {:?}, type {:?} name {:?}",
-                nm_conn.uuid(),
-                nm_conn.id(),
-                nm_conn.iface_type(),
-                nm_conn.iface_name(),
+                "Modifying connection {}: {}/{}",
+                uuid,
+                iface_name,
+                nm_iface_type
             );
         }
         nm_api
             .connection_add(nm_conn, memory_only)
+            .await
             .map_err(nm_error_to_nmstate)?;
     }
     Ok(())
 }
 
-pub(crate) fn activate_nm_profiles(
-    nm_api: &mut NmApi,
+pub(crate) async fn activate_nm_profiles(
+    nm_api: &mut NmApi<'_>,
     nm_conns: &[NmConnection],
-    nm_acs: &[NmActiveConnection],
 ) -> Result<(), NmstateError> {
     let mut nm_conns = nm_conns.to_vec();
+    let nm_acs = nm_api
+        .active_connections_get()
+        .await
+        .map_err(nm_error_to_nmstate)?;
     let nm_ac_uuids: Vec<&str> =
         nm_acs.iter().map(|nm_ac| &nm_ac.uuid as &str).collect();
 
@@ -134,7 +138,8 @@ pub(crate) fn activate_nm_profiles(
                 nm_api,
                 nm_conns.as_slice(),
                 nm_ac_uuids.as_slice(),
-            )?;
+            )
+            .await?;
             if remain_nm_conns.is_empty() {
                 break;
             }
@@ -151,8 +156,9 @@ pub(crate) fn activate_nm_profiles(
             for _ in 0..wait_internal {
                 nm_api
                     .extend_timeout_if_required()
+                    .await
                     .map_err(nm_error_to_nmstate)?;
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         } else {
             break;
@@ -162,26 +168,21 @@ pub(crate) fn activate_nm_profiles(
 }
 
 // Return list of activation failed `NmConnection` which we can retry
-fn _activate_nm_profiles(
-    nm_api: &mut NmApi,
+async fn _activate_nm_profiles(
+    nm_api: &mut NmApi<'_>,
     nm_conns: &[NmConnection],
     nm_ac_uuids: &[&str],
 ) -> Result<Vec<(NmConnection, NmstateError)>, NmstateError> {
-    let mut new_controllers: Vec<&str> = Vec::new();
+    // Contain a list of `(iface_name, nm_iface_type)`.
+    let mut new_controllers: Vec<(&str, NmIfaceType)> = Vec::new();
     let mut failed_nm_conns: Vec<(NmConnection, NmstateError)> = Vec::new();
-    for nm_conn in nm_conns.iter().filter(|c| {
-        c.iface_type().map(|t| NM_SETTING_CONTROLLERS.contains(&t))
-            == Some(true)
-    }) {
+    for nm_conn in nm_conns
+        .iter()
+        .filter(|c| c.iface_type().map(|t| t.is_controller()) == Some(true))
+    {
         if let Some(uuid) = nm_conn.uuid() {
-            log::info!(
-                "Activating connection {}: {}/{}",
-                uuid,
-                nm_conn.iface_name().unwrap_or(""),
-                nm_conn.iface_type().unwrap_or("")
-            );
             if nm_ac_uuids.contains(&uuid) {
-                if let Err(e) = reapply_or_activate(nm_api, nm_conn) {
+                if let Err(e) = reapply_or_activate(nm_api, nm_conn).await {
                     if e.kind().can_retry() {
                         failed_nm_conns.push((nm_conn.clone(), e));
                     } else {
@@ -189,9 +190,13 @@ fn _activate_nm_profiles(
                     }
                 }
             } else {
-                new_controllers.push(uuid);
+                new_controllers.push((
+                    nm_conn.iface_name().unwrap_or(""),
+                    nm_conn.iface_type().cloned().unwrap_or_default(),
+                ));
                 if let Err(e) = nm_api
                     .connection_activate(uuid)
+                    .await
                     .map_err(nm_error_to_nmstate)
                 {
                     if e.kind().can_retry() {
@@ -203,19 +208,19 @@ fn _activate_nm_profiles(
             }
         }
     }
-    for nm_conn in nm_conns.iter().filter(|c| {
-        c.iface_type().map(|t| NM_SETTING_CONTROLLERS.contains(&t))
-            != Some(true)
-    }) {
+    for nm_conn in nm_conns
+        .iter()
+        .filter(|c| c.iface_type().map(|t| t.is_controller()) != Some(true))
+    {
         if let Some(uuid) = nm_conn.uuid() {
             if nm_ac_uuids.contains(&uuid) {
                 log::info!(
                     "Reapplying connection {}: {}/{}",
                     uuid,
                     nm_conn.iface_name().unwrap_or(""),
-                    nm_conn.iface_type().unwrap_or("")
+                    nm_conn.iface_type().cloned().unwrap_or_default()
                 );
-                if let Err(e) = reapply_or_activate(nm_api, nm_conn) {
+                if let Err(e) = reapply_or_activate(nm_api, nm_conn).await {
                     if e.kind().can_retry() {
                         failed_nm_conns.push((nm_conn.clone(), e));
                     } else {
@@ -223,11 +228,14 @@ fn _activate_nm_profiles(
                     }
                 }
             } else {
-                if let Some(ctrller) = nm_conn.controller() {
-                    if nm_conn.iface_type() != Some("ovs-interface") {
+                if let (Some(ctrller), Some(ctrller_type)) =
+                    (nm_conn.controller(), nm_conn.controller_type())
+                {
+                    if nm_conn.iface_type() != Some(&NmIfaceType::OvsIface) {
                         // OVS port does not do auto port activation.
-                        if new_controllers.contains(&ctrller)
-                            && nm_conn.controller_type() != Some("ovs-port")
+                        if new_controllers
+                            .contains(&(ctrller, ctrller_type.clone()))
+                            && ctrller_type != &NmIfaceType::OvsPort
                         {
                             log::info!(
                                 "Skip connection activation as its \
@@ -235,7 +243,10 @@ fn _activate_nm_profiles(
                                 {}: {}/{}",
                                 uuid,
                                 nm_conn.iface_name().unwrap_or(""),
-                                nm_conn.iface_type().unwrap_or("")
+                                nm_conn
+                                    .iface_type()
+                                    .cloned()
+                                    .unwrap_or_default()
                             );
                             continue;
                         }
@@ -245,10 +256,11 @@ fn _activate_nm_profiles(
                     "Activating connection {}: {}/{}",
                     uuid,
                     nm_conn.iface_name().unwrap_or(""),
-                    nm_conn.iface_type().unwrap_or("")
+                    nm_conn.iface_type().cloned().unwrap_or_default()
                 );
                 if let Err(e) = nm_api
                     .connection_activate(uuid)
+                    .await
                     .map_err(nm_error_to_nmstate)
                 {
                     if e.kind().can_retry() {
@@ -263,8 +275,8 @@ fn _activate_nm_profiles(
     Ok(failed_nm_conns)
 }
 
-pub(crate) fn deactivate_nm_profiles(
-    nm_api: &mut NmApi,
+pub(crate) async fn deactivate_nm_profiles(
+    nm_api: &mut NmApi<'_>,
     nm_conns: &[NmConnection],
 ) -> Result<(), NmstateError> {
     for nm_conn in nm_conns {
@@ -273,11 +285,17 @@ pub(crate) fn deactivate_nm_profiles(
                 "Deactivating connection {}: {}/{}",
                 uuid,
                 nm_conn.iface_name().unwrap_or(""),
-                nm_conn.iface_type().unwrap_or("")
+                nm_conn.iface_type().cloned().unwrap_or_default()
             );
-            nm_api
-                .connection_deactivate(uuid)
-                .map_err(nm_error_to_nmstate)?;
+            if let Err(e) = nm_api.connection_deactivate(uuid).await {
+                if e.kind
+                    != nm_dbus::ErrorKind::Manager(
+                        nm_dbus::NmManagerError::ConnectionNotActive,
+                    )
+                {
+                    return Err(nm_error_to_nmstate(e));
+                }
+            }
         }
     }
     Ok(())
@@ -285,14 +303,14 @@ pub(crate) fn deactivate_nm_profiles(
 
 pub(crate) fn create_index_for_nm_conns_by_name_type(
     nm_conns: &[NmConnection],
-) -> HashMap<(&str, &str), Vec<&NmConnection>> {
-    let mut ret: HashMap<(&str, &str), Vec<&NmConnection>> = HashMap::new();
+) -> HashMap<(&str, NmIfaceType), Vec<&NmConnection>> {
+    let mut ret: HashMap<(&str, NmIfaceType), Vec<&NmConnection>> =
+        HashMap::new();
     for nm_conn in nm_conns {
         if let Some(iface_name) = nm_conn.iface_name() {
             if let Some(nm_iface_type) = nm_conn.iface_type() {
-                if nm_iface_type == NM_SETTING_VETH_SETTING_NAME {
-                    match ret.entry((iface_name, NM_SETTING_WIRED_SETTING_NAME))
-                    {
+                if nm_iface_type == &NmIfaceType::Veth {
+                    match ret.entry((iface_name, NmIfaceType::Ethernet)) {
                         Entry::Occupied(o) => {
                             o.into_mut().push(nm_conn);
                         }
@@ -301,9 +319,8 @@ pub(crate) fn create_index_for_nm_conns_by_name_type(
                         }
                     };
                 }
-                if nm_iface_type == NM_SETTING_WIRED_SETTING_NAME {
-                    match ret.entry((iface_name, NM_SETTING_VETH_SETTING_NAME))
-                    {
+                if nm_iface_type == &NmIfaceType::Ethernet {
+                    match ret.entry((iface_name, NmIfaceType::Veth)) {
                         Entry::Occupied(o) => {
                             o.into_mut().push(nm_conn);
                         }
@@ -312,7 +329,7 @@ pub(crate) fn create_index_for_nm_conns_by_name_type(
                         }
                     };
                 }
-                match ret.entry((iface_name, nm_iface_type)) {
+                match ret.entry((iface_name, nm_iface_type.clone())) {
                     Entry::Occupied(o) => {
                         o.into_mut().push(nm_conn);
                     }
@@ -326,33 +343,57 @@ pub(crate) fn create_index_for_nm_conns_by_name_type(
     ret
 }
 
-pub(crate) fn delete_profiles(
-    nm_api: &mut NmApi,
+pub(crate) async fn delete_profiles(
+    nm_api: &mut NmApi<'_>,
     uuids: &[&str],
 ) -> Result<(), NmstateError> {
     for uuid in uuids {
         nm_api
             .connection_delete(uuid)
+            .await
             .map_err(nm_error_to_nmstate)?;
     }
     Ok(())
 }
 
-fn reapply_or_activate(
-    nm_api: &mut NmApi,
+async fn reapply_or_activate(
+    nm_api: &mut NmApi<'_>,
     nm_conn: &NmConnection,
 ) -> Result<(), NmstateError> {
-    if let Err(e) = nm_api.connection_reapply(nm_conn) {
-        if let Some(uuid) = nm_conn.uuid() {
-            log::debug!(
-                "Reapply operation failed trying activation, \
-                reason: {}, retry on normal activation",
-                e
-            );
-            nm_api
-                .connection_activate(uuid)
-                .map_err(nm_error_to_nmstate)?;
+    let uuid = match nm_conn.uuid() {
+        Some(u) => u,
+        None => {
+            return Err(NmstateError::new(
+                ErrorKind::Bug,
+                format!(
+                    "reapply_or_activate(): Got NmConnection without UUID \
+                    {nm_conn:?}"
+                ),
+            ));
         }
+    };
+    log::info!(
+        "Reapplying connection {}: {}/{}",
+        uuid,
+        nm_conn.iface_name().unwrap_or(""),
+        nm_conn.iface_type().cloned().unwrap_or_default()
+    );
+    if let Err(e) = nm_api.connection_reapply(nm_conn).await {
+        log::info!(
+            "Reapply operation failed on {} {} {uuid}, \
+            reason: {}, retry on normal activation",
+            nm_conn.iface_type().cloned().unwrap_or_default(),
+            nm_conn.iface_name().unwrap_or(""),
+            e
+        );
+        nm_api
+            .connection_activate(uuid)
+            .await
+            .map_err(nm_error_to_nmstate)?;
     }
     Ok(())
+}
+
+pub(crate) fn is_uuid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok()
 }

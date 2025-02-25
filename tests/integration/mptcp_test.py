@@ -1,21 +1,4 @@
-#
-# Copyright (c) 2022 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 import pytest
 
@@ -31,7 +14,6 @@ from libnmstate.schema import Mptcp
 
 from .testlib import assertlib
 from .testlib import cmdlib
-from .testlib.env import nm_minor_version
 
 
 IPV4_ADDRESS1 = "192.0.2.251"
@@ -120,9 +102,6 @@ def eth1_with_static_ip(eth1_up):
         "fullmesh@subflow@backup",
     ],
 )
-@pytest.mark.skipif(
-    nm_minor_version() < 40, reason="MPTCP is not supported by NetworkManager"
-)
 def test_enable_mptcp_flags_and_remove(eth1_with_static_ip, mptcp_flags):
     expected_state = eth1_with_static_ip
     desired_state = {
@@ -177,9 +156,6 @@ def test_enable_mptcp_flags_and_remove(eth1_with_static_ip, mptcp_flags):
         "fullmesh@subflow@backup@signal",
     ],
 )
-@pytest.mark.skipif(
-    nm_minor_version() < 40, reason="MPTCP is not supported by NetworkManager"
-)
 def test_invalid_mptcp_flags(eth1_with_static_ip, mptcp_flags):
     with pytest.raises(NmstateValueError):
         libnmstate.apply(
@@ -196,3 +172,30 @@ def test_invalid_mptcp_flags(eth1_with_static_ip, mptcp_flags):
                 ]
             }
         )
+
+
+# https://issues.redhat.com/browse/RHEL-38607
+def test_purge_mptcp_on_auto_ip_iface_with_dhcp_server(eth1_up):
+    libnmstate.apply(
+        {
+            Interface.KEY: [
+                {
+                    Interface.NAME: "eth1",
+                    Interface.TYPE: InterfaceType.ETHERNET,
+                    Interface.STATE: InterfaceState.UP,
+                    Interface.MPTCP: {
+                        Mptcp.ADDRESS_FLAGS: [],
+                    },
+                    Interface.IPV4: {
+                        InterfaceIPv4.ENABLED: True,
+                        InterfaceIPv4.DHCP: True,
+                    },
+                    Interface.IPV6: {
+                        InterfaceIPv6.ENABLED: True,
+                        InterfaceIPv6.DHCP: True,
+                        InterfaceIPv6.AUTOCONF: True,
+                    },
+                }
+            ]
+        }
+    )

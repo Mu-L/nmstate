@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::super::{
     connection::DbusDictionary,
@@ -12,11 +12,12 @@ use super::super::{
     NmError, ToDbusValue,
 };
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(try_from = "DbusDictionary")]
 #[non_exhaustive]
 pub struct NmSettingWired {
     pub cloned_mac_address: Option<String>,
+    pub mac_address: Option<String>,
     pub mtu: Option<u32>,
     pub accept_all_mac_addresses: Option<i32>,
     pub speed: Option<u32>,
@@ -32,6 +33,12 @@ impl TryFrom<DbusDictionary> for NmSettingWired {
             cloned_mac_address: _from_map!(
                 v,
                 "cloned-mac-address",
+                own_value_to_bytes_array
+            )?
+            .map(u8_array_to_mac_string),
+            mac_address: _from_map!(
+                v,
+                "mac-address",
                 own_value_to_bytes_array
             )?
             .map(u8_array_to_mac_string),
@@ -55,6 +62,12 @@ impl ToDbusValue for NmSettingWired {
         if let Some(v) = &self.cloned_mac_address {
             ret.insert(
                 "cloned-mac-address",
+                zvariant::Value::new(mac_str_to_u8_array(v)),
+            );
+        }
+        if let Some(v) = &self.mac_address {
+            ret.insert(
+                "mac-address",
                 zvariant::Value::new(mac_str_to_u8_array(v)),
             );
         }

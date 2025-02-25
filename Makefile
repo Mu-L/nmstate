@@ -5,8 +5,14 @@ VERSION_MINOR=$(shell echo $(VERSION) | cut -f2 -d.)
 VERSION_MICRO=$(shell echo $(VERSION) | cut -f3 -d.)
 GIT_COMMIT=$(shell git rev-parse --short HEAD)
 TIMESTAMP=$(shell date +%Y%m%d)
-TARBALL=nmstate-$(VERSION)-alpha.$(TIMESTAMP).$(GIT_COMMIT).tar.gz
-VENDOR_TARBALL=nmstate-vendor-$(VERSION).$(TIMESTAMP).$(GIT_COMMIT).tar.xz
+COMMIT_COUNT=$(shell git rev-list --count HEAD --)
+ifeq ($(RELEASE), 1)
+    TARBALL=nmstate-$(VERSION).tar.gz
+    VENDOR_TARBALL=nmstate-vendor-$(VERSION).tar.xz
+else
+    TARBALL=nmstate-$(VERSION)-alpha-0.$(TIMESTAMP).$(COMMIT_COUNT)git$(GIT_COMMIT).tar.gz
+    VENDOR_TARBALL=nmstate-vendor-$(VERSION)-alpha-0.$(TIMESTAMP).$(COMMIT_COUNT)git$(GIT_COMMIT).tar.xz
+endif
 CLIB_SO_DEV=libnmstate.so
 CLIB_A_DEV=libnmstate.a
 CLIB_SO_MAN=$(CLIB_SO_DEV).$(VERSION_MAJOR)
@@ -34,15 +40,32 @@ SYSTEMD_UNIT_MANPAGE=doc/nmstate.service.8
 ETC_README=doc/nmstate.service.README
 SPEC_FILE=packaging/nmstate.spec
 RPM_DATA=$(shell date +"%a %b %d %Y")
+RUST_SOURCES := $(shell find rust/ -name "*.rs" -print)
+
+# Due to tokio bug https://github.com/tokio-rs/tokio/issues/6889
+# We only check for definite memory leak
+define VALGRIND_OPTS
+--errors-for-leak-kinds=definite --trace-children=yes \
+--leak-check=full --error-exitcode=1
+endef
+
 
 #outdir is used by COPR as well: https://docs.pagure.org/copr.copr/user_documentation.html
 outdir ?= $(ROOT_DIR)
 
 CPU_BITS = $(shell getconf LONG_BIT)
 ifeq ($(CPU_BITS), 32)
-    LIBDIR ?= $(PREFIX)/lib
+    ifneq (,$(wildcard /etc/debian_version))
+        LIBDIR ?= $(PREFIX)/lib/i386-linux-gnu
+    else
+        LIBDIR ?= $(PREFIX)/lib
+    endif
 else
-    LIBDIR ?= $(PREFIX)/lib$(CPU_BITS)
+    ifneq (,$(wildcard /etc/debian_version))
+        LIBDIR ?= $(PREFIX)/lib/x86_64-linux-gnu
+    else
+        LIBDIR ?= $(PREFIX)/lib$(CPU_BITS)
+    endif
 endif
 
 INCLUDE_DIR ?= $(PREFIX)/include
@@ -50,15 +73,12 @@ PKG_CONFIG_LIBDIR ?= $(LIBDIR)/pkgconfig
 MAN_DIR ?= $(PREFIX)/share/man
 
 SKIP_PYTHON_INSTALL ?=0
-SKIP_VENDOR_CREATION ?=0
 RELEASE ?=0
 
 PYTHON3_SITE_DIR ?=$(shell \
-	python3 -c \
-		"from distutils.sysconfig import get_python_lib; \
-		 print(get_python_lib())")
+	python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")
 
-$(CLI_EXEC_RELEASE) $(CLIB_SO_DEV_RELEASE):
+$(CLI_EXEC_RELEASE) $(CLIB_SO_DEV_RELEASE): $(RUST_SOURCES)
 	cd rust; cargo build --all --release
 
 $(CLIB_SO_DEV_DEBUG):
@@ -87,18 +107,8 @@ manpage: $(CLI_MANPAGE) $(CLI_MANPAGE2) $(SYSTEMD_UNIT_MANPAGE)
 clib: $(CLIB_HEADER) $(CLIB_SO_DEV_RELEASE) $(CLIB_PKG_CONFIG)
 
 .PHONY: $(SPEC_FILE)
-$(SPEC_FILE): $(SPEC_FILE).in
-	cp $(SPEC_FILE).in $(SPEC_FILE)
-	sed -i -e "s/@VERSION@/$(VERSION)/" $(SPEC_FILE)
-	if [ $(RELEASE) == 1 ];then \
-		sed -i -e "s/@RELEASE@/1/" $(SPEC_FILE); \
-	else \
-		sed -i -e "s/@RELEASE@/0.alpha.$(TIMESTAMP).$(GIT_COMMIT)/" \
-			$(SPEC_FILE);\
-		sed -i -e "s|^Source0:.\+|Source0: $(TARBALL)|" $(SPEC_FILE); \
-	fi
-	sed -i -e "s/@CHANGELOG@/* $(RPM_DATA) N. N. - $(VERSION)-1/" \
-		$(SPEC_FILE)
+$(SPEC_FILE):
+	env IS_RELEASE=$(RELEASE) packaging/make_spec.sh
 
 .PHONY: $(CLIB_HEADER)
 $(CLIB_HEADER): $(CLIB_HEADER).in
@@ -132,9 +142,16 @@ dist: manpage $(SPEC_FILE) $(CLIB_HEADER)
 	cp $(SYSTEMD_SERVICE_FILE) $(TMPDIR)/nmstate-$(VERSION)/
 	cd $(TMPDIR) && tar cfz $(TARBALL) nmstate-$(VERSION)/
 	mv $(TMPDIR)/$(TARBALL) ./
-	if [ $(SKIP_VENDOR_CREATION) == 0 ];then \
+	if [ $(RELEASE) == 1 ];then \
 		cd rust; \
-		cargo vendor-filterer --platform x86_64-unknown-linux-gnu $(TMPDIR)/vendor; \
+		cargo vendor-filterer $(TMPDIR)/vendor || \
+		(echo -en "\nNot cargo-vendor-filterer, Please install via "; \
+		 echo -e "'cargo install cargo-vendor-filterer'\n";); \
+		cd $(TMPDIR); \
+		tar cfJ $(ROOT_DIR)/$(VENDOR_TARBALL) vendor ; \
+	else \
+		cd rust; \
+		cargo vendor $(TMPDIR)/vendor; \
 		cd $(TMPDIR); \
 		tar cfJ $(ROOT_DIR)/$(VENDOR_TARBALL) vendor ; \
 	fi
@@ -142,17 +159,12 @@ dist: manpage $(SPEC_FILE) $(CLIB_HEADER)
 	echo $(TARBALL)
 
 release: dist
-	$(eval NEW_TARBALL=nmstate-$(VERSION).tar.gz)
 	if [ $(RELEASE) == 1 ];then \
-		mv $(TARBALL) $(NEW_TARBALL); \
-		if [ $(SKIP_VENDOR_CREATION) == 0 ];then \
-			mv $(VENDOR_TARBALL) \
-			$(ROOT_DIR)/nmstate-vendor-$(VERSION).tar.xz; \
-		fi; \
-		gpg2 --armor --detach-sign $(NEW_TARBALL); \
-	else \
 		gpg2 --armor --detach-sign $(TARBALL); \
 	fi
+
+upstream_release:
+	$(ROOT_DIR)/automation/upstream_release.sh
 
 .PHONY: srpm
 srpm: dist
@@ -175,19 +187,44 @@ clib_check: $(CLIB_SO_DEV_DEBUG) $(CLIB_HEADER)
 	cp $(CLIB_SO_DEV_DEBUG) $(TMPDIR)/$(CLIB_SO_FULL)
 	ln -sfv $(CLIB_SO_FULL) $(TMPDIR)/$(CLIB_SO_MAN)
 	ln -sfv $(CLIB_SO_FULL) $(TMPDIR)/$(CLIB_SO_DEV)
+	rust/src/clib/test/check_clib_soname.sh $(TMPDIR)/$(CLIB_SO_DEV)
 	cp $(CLIB_HEADER) $(TMPDIR)/$(shell basename $(CLIB_HEADER))
-	cc -g -Wall -Wextra -L$(TMPDIR) -I$(TMPDIR) -lnmstate \
-		-o $(TMPDIR)/nmstate_test rust/src/clib/test/nmstate_test.c
-	cc -g -Wall -Wextra -L$(TMPDIR) -I$(TMPDIR) -lnmstate \
-		-o $(TMPDIR)/nmpolicy_test rust/src/clib/test/nmpolicy_test.c
+	cc -g -Wall -Wextra -L$(TMPDIR) -I$(TMPDIR) \
+		-o $(TMPDIR)/nmstate_json_test \
+		rust/src/clib/test/nmstate_json_test.c -lnmstate
+	cc -g -Wall -Wextra -L$(TMPDIR) -I$(TMPDIR) \
+		-o $(TMPDIR)/nmpolicy_json_test \
+		rust/src/clib/test/nmpolicy_json_test.c -lnmstate
+	cc -g -Wall -Wextra -L$(TMPDIR) -I$(TMPDIR) \
+		-o $(TMPDIR)/nmstate_yaml_test \
+		rust/src/clib/test/nmstate_yaml_test.c -lnmstate
+	cc -g -Wall -Wextra -L$(TMPDIR) -I$(TMPDIR) \
+		-o $(TMPDIR)/nmpolicy_yaml_test \
+		rust/src/clib/test/nmpolicy_yaml_test.c -lnmstate
+	cc -g -Wall -Wextra -L$(TMPDIR) -I$(TMPDIR) \
+		-o $(TMPDIR)/nmstate_gen_diff_test \
+		rust/src/clib/test/nmstate_gen_diff_test.c -lnmstate
+	cc -g -Wall -Wextra -L$(TMPDIR) -I$(TMPDIR) \
+		-o $(TMPDIR)/nmstate_fmt_test \
+		rust/src/clib/test/nmstate_fmt_test.c -lnmstate
 	LD_LIBRARY_PATH=$(TMPDIR) \
-		valgrind --trace-children=yes --leak-check=full \
-		--error-exitcode=1 \
-		$(TMPDIR)/nmstate_test 1>/dev/null
+		valgrind $(VALGRIND_OPTS) \
+		$(TMPDIR)/nmstate_json_test 1>/dev/null
 	LD_LIBRARY_PATH=$(TMPDIR) \
-		valgrind --trace-children=yes --leak-check=full \
-		--error-exitcode=1 \
-		$(TMPDIR)/nmpolicy_test 1>/dev/null
+		valgrind $(VALGRIND_OPTS) \
+		$(TMPDIR)/nmpolicy_json_test 1>/dev/null
+	LD_LIBRARY_PATH=$(TMPDIR) \
+		valgrind $(VALGRIND_OPTS) \
+		$(TMPDIR)/nmstate_yaml_test 1>/dev/null
+	LD_LIBRARY_PATH=$(TMPDIR) \
+		valgrind $(VALGRIND_OPTS) \
+		$(TMPDIR)/nmpolicy_yaml_test 1>/dev/null
+	LD_LIBRARY_PATH=$(TMPDIR) \
+		valgrind $(VALGRIND_OPTS) \
+		$(TMPDIR)/nmstate_gen_diff_test 1>/dev/null
+	LD_LIBRARY_PATH=$(TMPDIR) \
+		valgrind $(VALGRIND_OPTS) \
+		$(TMPDIR)/nmstate_fmt_test 1>/dev/null
 	rm -rf $(TMPDIR)
 
 .PHONY: go_check

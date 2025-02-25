@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::time::SystemTime;
 
 use libc::{c_char, c_int};
 
-use crate::{init_logger, NMSTATE_FAIL, NMSTATE_PASS};
+use crate::{
+    init_logger,
+    state::{c_str_to_net_state, is_state_in_json},
+    NMSTATE_FAIL, NMSTATE_PASS,
+};
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
@@ -46,62 +50,50 @@ pub extern "C" fn nmstate_generate_configurations(
     };
     let now = SystemTime::now();
 
-    let net_state_cstr = unsafe { CStr::from_ptr(state) };
-
-    let net_state_str = match net_state_cstr.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            unsafe {
-                *err_msg = CString::new(format!(
-                    "Error on converting C char to rust str: {e}"
-                ))
-                .unwrap()
-                .into_raw();
-                *err_kind = CString::new(format!(
-                    "{}",
-                    nmstate::ErrorKind::InvalidArgument
-                ))
-                .unwrap()
-                .into_raw();
-            }
-            return NMSTATE_FAIL;
-        }
-    };
-
-    let net_state = match nmstate::NetworkState::new_from_json(net_state_str) {
+    let net_state = match c_str_to_net_state(state, err_kind, err_msg) {
         Ok(n) => n,
-        Err(e) => {
-            unsafe {
-                *err_msg = CString::new(e.msg()).unwrap().into_raw();
-                *err_kind =
-                    CString::new(format!("{}", &e.kind())).unwrap().into_raw();
-            }
-            return NMSTATE_FAIL;
+        Err(rc) => {
+            return rc;
         }
     };
 
+    let input_is_json = is_state_in_json(state);
     let result = net_state.gen_conf();
     unsafe {
         *log = CString::new(logger.drain(now)).unwrap().into_raw();
     }
     match result {
-        Ok(s) => match serde_json::to_string(&s) {
-            Ok(cfgs) => unsafe {
-                *configs = CString::new(cfgs).unwrap().into_raw();
-                NMSTATE_PASS
-            },
-            Err(e) => unsafe {
-                *err_msg =
-                    CString::new(format!("serde_json::to_string failure: {e}"))
-                        .unwrap()
-                        .into_raw();
-                *err_kind =
-                    CString::new(format!("{}", nmstate::ErrorKind::Bug))
-                        .unwrap()
-                        .into_raw();
-                NMSTATE_FAIL
-            },
-        },
+        Ok(s) => {
+            let serialize = if input_is_json {
+                serde_json::to_string(&s).map_err(|e| {
+                    nmstate::NmstateError::new(
+                        nmstate::ErrorKind::Bug,
+                        format!("Failed to convert state {s:?} to JSON: {e}"),
+                    )
+                })
+            } else {
+                serde_yaml::to_string(&s).map_err(|e| {
+                    nmstate::NmstateError::new(
+                        nmstate::ErrorKind::Bug,
+                        format!("Failed to convert state {s:?} to YAML: {e}"),
+                    )
+                })
+            };
+
+            match serialize {
+                Ok(cfgs) => unsafe {
+                    *configs = CString::new(cfgs).unwrap().into_raw();
+                    NMSTATE_PASS
+                },
+                Err(e) => unsafe {
+                    *err_msg =
+                        CString::new(e.msg().to_string()).unwrap().into_raw();
+                    *err_kind =
+                        CString::new(e.kind().to_string()).unwrap().into_raw();
+                    NMSTATE_FAIL
+                },
+            }
+        }
         Err(e) => {
             unsafe {
                 *err_msg = CString::new(e.msg()).unwrap().into_raw();

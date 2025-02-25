@@ -1,22 +1,5 @@
-#
-# Copyright (c) 2018-2021 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
-""" Test the nmstate example files """
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
 import os
 
 import pytest
@@ -35,8 +18,9 @@ from libnmstate.schema import DNS
 from libnmstate.schema import HostNameState
 from libnmstate.schema import RouteRule
 
+from .testlib.env import is_el8
 from .testlib.env import is_k8s
-from .testlib.env import nm_major_minor_version
+from .testlib.env import nm_minor_version
 
 
 @pytest.mark.tier1
@@ -145,6 +129,24 @@ def test_add_remove_routes(eth1_up):
 
 
 @pytest.mark.tier1
+@pytest.mark.skipif(
+    nm_minor_version() < 42,
+    reason="Loopback is only support on NM 1.42+, and blackhole type route "
+    "is stored in loopback",
+)
+def test_add_remove_special_routes(eth1_up):
+    """
+    Test adding an special route and removing it.
+    """
+    with example_state(
+        "blackhole_add_route.yml", cleanup="blackhole_del_route.yml"
+    ):
+        pass
+
+    assertlib.assert_no_config_route_to_iface("lo")
+
+
+@pytest.mark.tier1
 def test_add_remove_route_rule(eth1_up):
     """
     Test adding a route rule and removing all route rules next hop to eth1.
@@ -152,16 +154,8 @@ def test_add_remove_route_rule(eth1_up):
     with example_state(
         "eth1_add_route_rule.yml", cleanup="eth1_del_all_route_rules.yml"
     ) as desired_state:
-        rule = desired_state[RouteRule.KEY][RouteRule.CONFIG][0]
-        iprule.ip_rule_exist_in_os(
-            rule.get(RouteRule.IP_FROM),
-            rule.get(RouteRule.IP_TO),
-            rule.get(RouteRule.PRIORITY),
-            rule.get(RouteRule.ROUTE_TABLE),
-            rule.get(RouteRule.FWMARK),
-            rule.get(RouteRule.FWMASK),
-            rule.get(RouteRule.FAMILY),
-        )
+        for rule in desired_state[RouteRule.KEY][RouteRule.CONFIG]:
+            iprule.ip_rule_exist_in_os(rule)
 
 
 @pytest.mark.skipif(
@@ -239,10 +233,6 @@ def test_add_mac_vtap_and_remove():
     assertlib.assert_absent("macvtap0")
 
 
-@pytest.mark.skipif(
-    nm_major_minor_version() <= 1.28,
-    reason="Modifying veth is not supported on lower NetworkManager versions.",
-)
 def test_add_veth_and_remove():
     with example_state(
         "veth1_up.yml", cleanup="veth1_absent.yml"
@@ -253,10 +243,6 @@ def test_add_veth_and_remove():
     assertlib.assert_absent("veth1peer")
 
 
-@pytest.mark.skipif(
-    nm_major_minor_version() <= 1.30,
-    reason="Generating config is not supported on NetworkManager 1.30-",
-)
 @pytest.mark.tier1
 def test_gen_conf_for_examples():
     example_dir = find_examples_dir()
@@ -272,6 +258,44 @@ def test_gen_conf_for_examples():
                 assert first_result == second_result
 
 
+@pytest.mark.tier1
+def test_add_macsec_and_remove_example(eth1_up):
+    with example_state(
+        "macsec0_up.yml", cleanup="macsec0_absent.yml"
+    ) as desired_state:
+        assertlib.assert_state(desired_state)
+
+    assertlib.assert_absent("macsec0")
+
+
+@pytest.mark.skipif(
+    nm_minor_version() < 45 or is_el8(),
+    reason="HSR is supported only in NetworkManager 1.45+",
+)
+@pytest.mark.tier1
+def test_add_hsr_and_remove_example(eth1_up):
+    with example_state(
+        "hsr0_up.yml", cleanup="hsr0_absent.yml"
+    ) as desired_state:
+        assertlib.assert_state(desired_state)
+
+    assertlib.assert_absent("hsr0")
+
+
+@pytest.mark.skipif(
+    nm_minor_version() <= 44,
+    reason="Bond port config is not supported on NetworkManager 1.44-",
+)
+def test_bond_port(eth1_up, eth2_up):
+    with example_state(
+        "bond_port_up.yml",
+        cleanup="bond_port_absent.yml",
+    ) as desired_state:
+        assertlib.assert_state_match(desired_state)
+
+    assertlib.assert_absent("bond0")
+
+
 @pytest.mark.skipif(
     os.environ.get("CI") == "true",
     reason="NM cannot change hostname in container",
@@ -282,3 +306,16 @@ def test_static_hostname_for_examples():
     ) as desired_state:
         cur_hostname = libnmstate.show()[HostNameState.KEY]
         assert cur_hostname == desired_state[HostNameState.KEY]
+
+
+@pytest.mark.skipif(
+    nm_minor_version() < 51,
+    reason="IPVLAN is only supported on NetworkManager 1.51+",
+)
+def test_add_ipvlan_and_remove_example(eth1_up):
+    with example_state(
+        "ipvlan_create.yml", cleanup="ipvlan_absent.yml"
+    ) as desired_state:
+        assertlib.assert_state(desired_state)
+
+    assertlib.assert_absent("ipvlan0")

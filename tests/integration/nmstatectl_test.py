@@ -1,35 +1,22 @@
-#
-# Copyright (c) 2018-2021 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 import json
 import os
 import pytest
 import time
 import yaml
+from tempfile import NamedTemporaryFile
 
 import libnmstate
 from libnmstate import __version__
 from libnmstate.error import NmstateConflictError
 from libnmstate.schema import Constants
+from libnmstate.schema import DNS
+from libnmstate.schema import Interface
+from libnmstate.schema import InterfaceIPv4
+from libnmstate.schema import InterfaceIPv6
 from libnmstate.schema import Route
 from libnmstate.schema import RouteRule
-from libnmstate.schema import DNS
 
 from .testlib import assertlib
 from .testlib import cmdlib
@@ -37,6 +24,7 @@ from .testlib.examplelib import example_state
 from .testlib.examplelib import find_examples_dir
 from .testlib.examplelib import load_example
 from .testlib.statelib import state_match
+from .testlib.statelib import show_only
 
 
 APPLY_CMD = ["nmstatectl", "apply"]
@@ -214,22 +202,22 @@ def test_apply_command_with_two_states():
     assertlib.assert_absent("linux-br0")
 
 
+@pytest.mark.tier1
 def test_manual_confirmation(eth1_up):
     """I can manually confirm a state."""
 
     with example_state(CONFIRMATION_CLEAN, CONFIRMATION_CLEAN):
-
         assert_command(CONFIRMATION_APPLY)
         assertlib.assert_state(CONFIRMATION_TEST_STATE)
         assert_command(CONFIRM_CMD)
         assertlib.assert_state(CONFIRMATION_TEST_STATE)
 
 
+@pytest.mark.tier1
 def test_manual_rollback(eth1_up):
     """I can manually roll back a state."""
 
     with example_state(CONFIRMATION_CLEAN, CONFIRMATION_CLEAN) as clean_state:
-
         assert_command(CONFIRMATION_APPLY)
         assertlib.assert_state(CONFIRMATION_TEST_STATE)
         assert_command(ROLLBACK_CMD)
@@ -242,7 +230,6 @@ def test_dual_change(eth1_up):
     """
 
     with example_state(CONFIRMATION_CLEAN, CONFIRMATION_CLEAN) as clean_state:
-
         assert_command(CONFIRMATION_APPLY)
         assertlib.assert_state(CONFIRMATION_TEST_STATE)
 
@@ -259,7 +246,6 @@ def test_automatic_rollback(eth1_up):
     """If I do not confirm the state, it is automatically rolled back."""
 
     with example_state(CONFIRMATION_CLEAN, CONFIRMATION_CLEAN) as clean_state:
-
         assert_command(CONFIRMATION_TIMOUT_COMMAND)
         assertlib.assert_state(CONFIRMATION_TEST_STATE)
 
@@ -374,3 +360,68 @@ def test_show_iface_include_route_and_rule(eth1_with_static_route_and_rule):
         desired_state[RouteRule.KEY][RouteRule.CONFIG]
         == new_state[RouteRule.KEY][RouteRule.CONFIG]
     )
+
+
+def test_format_command():
+    with NamedTemporaryFile() as fd:
+        fd.write(
+            """---
+            interfaces:
+            - link-aggregation:
+                mode: balance-rr
+                port:
+                - eth2
+                - eth1
+              name: bond99
+              state: up
+              type: bond
+            - type: ethernet
+              name: eth1
+            - type: ethernet
+              name: eth2
+            """.encode(
+                "utf-8"
+            )
+        )
+        fd.flush()
+        output = cmdlib.exec_cmd(
+            f"nmstatectl format {fd.name}".split(), check=True
+        )[1]
+        assert (
+            """interfaces:
+- name: bond99
+  type: bond
+  state: up
+  link-aggregation:
+    mode: balance-rr
+    port:
+    - eth2
+    - eth1
+- name: eth1
+  type: ethernet
+  state: up
+- name: eth2
+  type: ethernet
+  state: up"""
+            in output
+        )
+
+
+def test_cli_apply_with_override_iface(eth1_with_static_route_and_rule):
+    with NamedTemporaryFile() as fd:
+        fd.write(
+            """---
+            interfaces:
+            - type: ethernet
+              name: eth1
+            """.encode(
+                "utf-8"
+            )
+        )
+        fd.flush()
+        cmdlib.exec_cmd(
+            f"nmstatectl apply --override-iface {fd.name}".split(), check=True
+        )
+    iface_state = show_only(("eth1",))[Interface.KEY][0]
+    assert not iface_state[Interface.IPV4][InterfaceIPv4.ENABLED]
+    assert not iface_state[Interface.IPV6][InterfaceIPv6.ENABLED]

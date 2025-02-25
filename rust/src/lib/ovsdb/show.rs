@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::iter::FromIterator;
 
 use serde_json::Value;
 
 use crate::{
-    BridgePortTunkTag, BridgePortVlanConfig, BridgePortVlanMode,
+    BridgePortTrunkTag, BridgePortVlanConfig, BridgePortVlanMode,
     BridgePortVlanRange, Interface, InterfaceType, Interfaces, NetworkState,
     NmstateError, OvsBridgeBondConfig, OvsBridgeBondMode,
     OvsBridgeBondPortConfig, OvsBridgeConfig, OvsBridgeInterface,
-    OvsBridgeOptions, OvsBridgePortConfig, OvsDbIfaceConfig, OvsDpdkConfig,
-    OvsInterface, OvsPatchConfig, UnknownInterface,
+    OvsBridgeOptions, OvsBridgePortConfig, OvsBridgeStpOptions,
+    OvsDbIfaceConfig, OvsDpdkConfig, OvsInterface, OvsPatchConfig,
+    UnknownInterface,
 };
 
 use super::db::{parse_str_map, OvsDbConnection, OvsDbEntry};
@@ -26,8 +26,6 @@ pub(crate) fn ovsdb_is_running() -> bool {
 
 pub(crate) fn ovsdb_retrieve() -> Result<NetworkState, NmstateError> {
     let mut ret = NetworkState::new();
-    ret.prop_list.push("interfaces");
-    ret.prop_list.push("ovsdb");
     let mut cli = OvsDbConnection::new()?;
     let ovsdb_ifaces = cli.get_ovs_ifaces()?;
     let ovsdb_brs = cli.get_ovs_bridges()?;
@@ -36,10 +34,6 @@ pub(crate) fn ovsdb_retrieve() -> Result<NetworkState, NmstateError> {
     for ovsdb_br in ovsdb_brs.values() {
         let mut iface = OvsBridgeInterface::new();
         iface.base.name = ovsdb_br.name.to_string();
-        iface.base.prop_list.push("ovsdb");
-        iface.base.prop_list.push("bridge");
-        iface.base.prop_list.push("iface_type");
-        iface.base.prop_list.push("state");
         let external_ids = HashMap::from_iter(
             ovsdb_br
                 .external_ids
@@ -60,7 +54,7 @@ pub(crate) fn ovsdb_retrieve() -> Result<NetworkState, NmstateError> {
         });
         iface.bridge =
             Some(parse_ovs_bridge_conf(ovsdb_br, &ovsdb_ports, &ovsdb_ifaces));
-        ret.append_interface_data(Interface::OvsBridge(iface));
+        ret.append_interface_data(Interface::OvsBridge(Box::new(iface)));
     }
 
     for ovsdb_iface in ovsdb_ifaces.values() {
@@ -71,7 +65,7 @@ pub(crate) fn ovsdb_retrieve() -> Result<NetworkState, NmstateError> {
         }
     }
 
-    ret.ovsdb = cli.get_ovsdb_global_conf()?;
+    ret.ovsdb = Some(cli.get_global_conf()?);
 
     Ok(ret)
 }
@@ -86,7 +80,7 @@ fn parse_ovs_bridge_conf(
     for port_uuid in ovsdb_br.ports.as_slice() {
         if let Some(ovsdb_port) = ovsdb_ports.get(port_uuid) {
             let mut port_conf = OvsBridgePortConfig::new();
-            port_conf.name = ovsdb_port.name.clone();
+            port_conf.name.clone_from(&ovsdb_port.name);
             if ovsdb_port.ports.len() > 1 {
                 port_conf.bond =
                     Some(parse_ovs_bond_conf(ovsdb_port, ovsdb_ifaces));
@@ -114,7 +108,7 @@ fn parse_ovs_bridge_options(
         ret.fail_mode = Some(String::new());
     }
     if let Some(Value::Bool(v)) = ovsdb_opts.get("stp_enable") {
-        ret.stp = Some(*v)
+        ret.stp = Some(OvsBridgeStpOptions::new_enabled(*v))
     }
     if let Some(Value::Bool(v)) = ovsdb_opts.get("rstp_enable") {
         ret.rstp = Some(*v)
@@ -241,7 +235,7 @@ fn parse_ovs_vlan_conf(
             {
                 if let Some(tag) = trunk_tag.as_u64() {
                     ret.trunk_tags =
-                        Some(vec![BridgePortTunkTag::Id(tag as u16)]);
+                        Some(vec![BridgePortTrunkTag::Id(tag as u16)]);
                 }
             }
         }
@@ -251,7 +245,7 @@ fn parse_ovs_vlan_conf(
     }
 }
 
-fn compress_vlan_trunk_tags(tags: &[Value]) -> Vec<BridgePortTunkTag> {
+fn compress_vlan_trunk_tags(tags: &[Value]) -> Vec<BridgePortTrunkTag> {
     let mut ranges: Vec<BridgePortVlanRange> = Vec::new();
     for tag in tags {
         if let Value::Number(tag) = tag {
@@ -282,9 +276,9 @@ fn compress_vlan_trunk_tags(tags: &[Value]) -> Vec<BridgePortTunkTag> {
     let mut ret = Vec::new();
     for range in ranges {
         if range.min == range.max {
-            ret.push(BridgePortTunkTag::Id(range.min))
+            ret.push(BridgePortTrunkTag::Id(range.min))
         } else {
-            ret.push(BridgePortTunkTag::IdRange(range))
+            ret.push(BridgePortTrunkTag::IdRange(range))
         }
     }
 
@@ -352,17 +346,12 @@ fn ovsdb_iface_to_nmstate(
     }
 
     let mut iface = match ovsdb_iface.iface_type.as_str() {
-        "system" => Interface::Unknown(UnknownInterface::new()),
-        "internal" => {
-            let mut ovs_iface = OvsInterface::new();
-            ovs_iface.base.prop_list.push("iface_type");
-            Interface::OvsInterface(ovs_iface)
-        }
+        "system" => Interface::Unknown(Box::new(UnknownInterface::new())),
+        "internal" => Interface::OvsInterface(Box::new(OvsInterface::new())),
         "patch" => {
             let mut ovs_iface = OvsInterface::new();
             ovs_iface.patch = parse_ovs_patch_conf(ovsdb_iface);
-            ovs_iface.base.prop_list.push("iface_type");
-            Interface::OvsInterface(ovs_iface)
+            Interface::OvsInterface(Box::new(ovs_iface))
         }
         "dpdk" => {
             let mut ovs_iface = OvsInterface::new();
@@ -370,23 +359,18 @@ fn ovsdb_iface_to_nmstate(
             // DPDK interface does not have kernel representative, the MTU is
             // set in ovsdb.
             ovs_iface.base.mtu = get_dpdk_mtu(ovsdb_iface);
-            ovs_iface.base.prop_list.push("iface_type");
-            ovs_iface.base.prop_list.push("mtu");
-            Interface::OvsInterface(ovs_iface)
+            Interface::OvsInterface(Box::new(ovs_iface))
         }
         i => {
-            log::warn!("Unknown OVS interface type {i}");
+            log::debug!("Unknown OVS interface type '{i}'");
             return None;
         }
     };
     iface.base_iface_mut().name = ovsdb_iface.name.to_string();
-    iface.base_iface_mut().prop_list.push("ovsdb");
 
     if let Some(ctrl) = port_to_ctrl.get(&iface.name()) {
         iface.base_iface_mut().controller = Some(ctrl.to_string());
         iface.base_iface_mut().controller_type = Some(InterfaceType::OvsBridge);
-        iface.base_iface_mut().prop_list.push("controller");
-        iface.base_iface_mut().prop_list.push("controller_type");
     }
 
     let external_ids = HashMap::from_iter(

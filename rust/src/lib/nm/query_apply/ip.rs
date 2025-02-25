@@ -33,31 +33,47 @@ pub(crate) fn nm_ip_setting_to_nmstate4(
                 (true, None)
             }
         };
+        let dhcp_send_hostname = if enabled && dhcp == Some(true) {
+            nm_ip_setting.dhcp_send_hostname.unwrap_or(true)
+        } else {
+            false
+        };
+
         let (auto_dns, auto_gateway, auto_routes, auto_table_id) =
             parse_dhcp_opts(nm_ip_setting);
         InterfaceIpv4 {
             enabled,
+            enabled_defined: true,
             dhcp,
             auto_dns,
             auto_routes,
             auto_gateway,
             auto_table_id,
-            prop_list: vec![
-                "enabled",
-                "dhcp",
-                "dhcp_client_id",
-                "dns",
-                "auto_dns",
-                "auto_routes",
-                "auto_gateway",
-                "auto_table_id",
-                "auto_route_metric",
-                "rules",
-            ],
             dns: Some(nm_dns_to_nmstate("", nm_ip_setting)),
             rules: nm_rules_to_nmstate(false, nm_ip_setting),
-            dhcp_client_id: nm_dhcp_client_id_to_nmstate(nm_ip_setting),
+            dhcp_client_id: if enabled && dhcp == Some(true) {
+                nm_dhcp_client_id_to_nmstate(nm_ip_setting)
+            } else {
+                None
+            },
             auto_route_metric: nm_ip_setting.route_metric.map(|i| i as u32),
+            dhcp_send_hostname: if enabled && dhcp == Some(true) {
+                Some(dhcp_send_hostname)
+            } else {
+                None
+            },
+            dhcp_custom_hostname: if enabled
+                && dhcp == Some(true)
+                && dhcp_send_hostname
+            {
+                nm_ip_setting
+                    .dhcp_fqdn
+                    .as_ref()
+                    .or(nm_ip_setting.dhcp_hostname.as_ref())
+                    .cloned()
+            } else {
+                None
+            },
             ..Default::default()
         }
     } else {
@@ -77,32 +93,28 @@ pub(crate) fn nm_ip_setting_to_nmstate6(
             | NmSettingIpMethod::Shared => (true, Some(false), Some(false)),
             NmSettingIpMethod::Auto => (true, Some(true), Some(true)),
             NmSettingIpMethod::Dhcp => (true, Some(true), Some(false)),
-            NmSettingIpMethod::Ignore => (true, Some(false), Some(false)),
+            NmSettingIpMethod::Ignore => {
+                log::debug!(
+                    "Found NmSettingIpMethod::Ignore for ipv6, \
+                    reply on nispor for setting IPv6 query"
+                );
+                return InterfaceIpv6 {
+                    enabled_defined: false,
+                    ..Default::default()
+                };
+            }
         };
         let (auto_dns, auto_gateway, auto_routes, auto_table_id) =
             parse_dhcp_opts(nm_ip_setting);
         let mut ret = InterfaceIpv6 {
             enabled,
+            enabled_defined: true,
             dhcp,
             autoconf,
             auto_dns,
             auto_routes,
             auto_gateway,
             auto_table_id,
-            prop_list: vec![
-                "enabled",
-                "dhcp",
-                "autoconf",
-                "dns",
-                "rules",
-                "auto_dns",
-                "auto_routes",
-                "auto_gateway",
-                "auto_table_id",
-                "dhcp_duid",
-                "addr_gen_mode",
-                "auto_route_metric",
-            ],
             dns: Some(nm_dns_to_nmstate(iface_name, nm_ip_setting)),
             rules: nm_rules_to_nmstate(true, nm_ip_setting),
             dhcp_duid: nm_dhcp_duid_to_nmstate(nm_ip_setting),
@@ -114,14 +126,23 @@ pub(crate) fn nm_ip_setting_to_nmstate6(
                 }
             },
             auto_route_metric: nm_ip_setting.route_metric.map(|i| i as u32),
+            dhcp_send_hostname: if enabled && dhcp == Some(true) {
+                Some(nm_ip_setting.dhcp_send_hostname.unwrap_or(true))
+            } else {
+                None
+            },
+            dhcp_custom_hostname: if enabled && dhcp == Some(true) {
+                nm_ip_setting.dhcp_hostname.clone()
+            } else {
+                None
+            },
             ..Default::default()
         };
         // NetworkManager only set IPv6 token to kernel when IPv6 autoconf
         // done. But nmstate should not wait DHCP, hence instead of depending
-        // on nispor kernel IPv6 token, we set IPv6 token base on information
+        // on nispor kernel IPv6 token, we set IPv6 token based on information
         // provided by NM connection.
         if let Some(token) = nm_ip_setting.token.as_ref() {
-            ret.prop_list.push("token");
             ret.token = Some(token.to_string());
         }
         ret
@@ -261,6 +282,17 @@ fn nm_rules_to_nmstate(
         }
         if let Some(v) = nm_rule.iifname.as_ref() {
             rule.iif = Some(v.to_string());
+        }
+        if let Some(v) = nm_rule.suppress_prefixlength {
+            match u32::try_from(v) {
+                Ok(i) => rule.suppress_prefix_length = Some(i),
+                Err(e) => {
+                    log::warn!(
+                        "BUG: Failed to convert `suppress_prefixlength` \
+                        got from NM: {v} to u32: {e}"
+                    );
+                }
+            }
         }
         if let Some(v) = nm_rule.action.as_ref() {
             rule.action = Some(match v {

@@ -3,17 +3,15 @@
 #[cfg(not(feature = "gen_conf"))]
 use std::collections::HashMap;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     DnsState, ErrorKind, HostNameState, Interface, Interfaces, MergedDnsState,
-    MergedHostNameState, MergedInterfaces, MergedOvsDbGlobalConfig,
-    MergedRouteRules, MergedRoutes, NmstateError, OvsDbGlobalConfig,
-    RouteRules, Routes,
+    MergedHostNameState, MergedInterfaces, MergedOvnConfiguration,
+    MergedOvsDbGlobalConfig, MergedRouteRules, MergedRoutes, NmstateError,
+    OvnConfiguration, OvsDbGlobalConfig, RouteRules, Routes,
 };
 
-#[derive(Clone, Debug, Serialize, Default, PartialEq, Eq)]
-#[non_exhaustive]
 /// The [NetworkState] represents the whole network state including both
 /// kernel status and configurations provides by backends(NetworkManager,
 /// OpenvSwitch databas, and etc).
@@ -76,36 +74,41 @@ use crate::{
 ///     system-id: 176866c7-6dc8-400f-98ac-c658509ec09f
 ///   other_config: {}
 /// ```
+#[derive(Clone, Debug, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct NetworkState {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// Description for the whole desire state. Currently it will not be
+    /// persisted by network backend and will be ignored during applying or
+    /// querying.
+    pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Hostname of current host.
     pub hostname: Option<HostNameState>,
-    #[serde(rename = "dns-resolver", default)]
     /// DNS resolver status, deserialize and serialize from/to `dns-resolver`.
-    pub dns: DnsState,
-    #[serde(rename = "route-rules", default)]
+    #[serde(rename = "dns-resolver", skip_serializing_if = "Option::is_none")]
+    pub dns: Option<DnsState>,
     /// Route rule, deserialize and serialize from/to `route-rules`.
-    pub rules: RouteRules,
-    #[serde(default)]
-    /// Route
-    pub routes: Routes,
-    #[serde(default)]
-    /// Network interfaces
-    pub interfaces: Interfaces,
     #[serde(
+        rename = "route-rules",
         default,
-        rename = "ovs-db",
-        skip_serializing_if = "OvsDbGlobalConfig::is_none"
+        skip_serializing_if = "RouteRules::is_empty"
     )]
+    pub rules: RouteRules,
+    /// Route
+    #[serde(default, skip_serializing_if = "Routes::is_empty")]
+    pub routes: Routes,
+    /// Network interfaces
+    #[serde(default)]
+    pub interfaces: Interfaces,
     /// The global configurations of OpenvSwitach daemon
-    pub ovsdb: OvsDbGlobalConfig,
+    #[serde(rename = "ovs-db", skip_serializing_if = "Option::is_none")]
+    pub ovsdb: Option<OvsDbGlobalConfig>,
+    #[serde(default, skip_serializing_if = "OvnConfiguration::is_none")]
+    /// The OVN configuration in the system
+    pub ovn: OvnConfiguration,
     #[serde(skip)]
-    // Contain a list of struct member name which is defined explicitly in
-    // desire state instead of generated.
-    /// Only for internal use. TODO: should changed to pub(crate)
-    pub prop_list: Vec<&'static str>,
-    #[serde(skip)]
-    // TODO: Hide user space only info when serialize
     pub(crate) kernel_only: bool,
     #[serde(skip)]
     pub(crate) no_verify: bool,
@@ -121,74 +124,19 @@ pub struct NetworkState {
     pub(crate) running_config_only: bool,
     #[serde(skip)]
     pub(crate) memory_only: bool,
-}
-
-impl<'de> Deserialize<'de> for NetworkState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let mut net_state = NetworkState::new();
-        let mut v = serde_json::Value::deserialize(deserializer)?;
-        let v = match v.as_object_mut() {
-            Some(v) => v,
-            None => {
-                return Err(serde::de::Error::custom(format!(
-                    "Expecting a HashMap/Object/Dictionary, but got {v}"
-                )));
-            }
-        };
-        if let Some(ifaces_value) = v.remove("interfaces") {
-            net_state.prop_list.push("interfaces");
-            net_state.interfaces = Interfaces::deserialize(ifaces_value)
-                .map_err(serde::de::Error::custom)?;
-        }
-        if let Some(dns_value) = v.remove("dns-resolver") {
-            net_state.prop_list.push("dns");
-            net_state.dns = DnsState::deserialize(dns_value)
-                .map_err(serde::de::Error::custom)?;
-        }
-        if let Some(route_value) = v.remove("routes") {
-            net_state.prop_list.push("routes");
-            net_state.routes = Routes::deserialize(route_value)
-                .map_err(serde::de::Error::custom)?;
-        }
-        if let Some(rule_value) = v.remove("route-rules") {
-            net_state.prop_list.push("rules");
-            net_state.rules = RouteRules::deserialize(rule_value)
-                .map_err(serde::de::Error::custom)?;
-        }
-        if let Some(ovsdb_value) = v.remove("ovs-db") {
-            net_state.prop_list.push("ovsdb");
-            net_state.ovsdb = OvsDbGlobalConfig::deserialize(ovsdb_value)
-                .map_err(serde::de::Error::custom)?;
-        }
-        if let Some(hostname_value) = v.remove("hostname") {
-            net_state.prop_list.push("hostname");
-            net_state.hostname = Some(
-                HostNameState::deserialize(hostname_value)
-                    .map_err(serde::de::Error::custom)?,
-            );
-        }
-        if !v.is_empty() {
-            Err(serde::de::Error::custom(format!(
-                "Unsupported keys found: {:?}",
-                v.keys().collect::<Vec<&String>>()
-            )))
-        } else {
-            Ok(net_state)
-        }
-    }
+    #[serde(skip)]
+    pub(crate) override_iface: bool,
 }
 
 impl NetworkState {
     pub fn is_empty(&self) -> bool {
         self.hostname.is_none()
-            && self.dns.is_empty()
+            && self.dns.is_none()
+            && self.ovsdb.is_none()
             && self.rules.is_empty()
             && self.routes.is_empty()
             && self.interfaces.is_empty()
-            && self.ovsdb.is_none()
+            && self.ovn.is_none()
     }
 
     pub(crate) const PASSWORD_HID_BY_NMSTATE: &'static str =
@@ -202,6 +150,10 @@ impl NetworkState {
     pub fn set_kernel_only(&mut self, value: bool) -> &mut Self {
         self.kernel_only = value;
         self
+    }
+
+    pub fn kernel_only(&self) -> bool {
+        self.kernel_only
     }
 
     /// By default(true), When nmstate applying the network state, after applied
@@ -262,6 +214,22 @@ impl NetworkState {
         self
     }
 
+    /// Nmstate by default will merge information from current state.
+    /// When set to true, for network state to apply, nmstate will:
+    ///
+    /// * For `interfaces` section, any defined interface will be configured by
+    ///   desired state information only, undefined properties of this interface
+    ///   will use default value instead of merging from current state.
+    ///
+    /// * For other sections, no changes to their original behavior.
+    ///
+    /// For example, if desired interface has no IPv4 section defined, nmstate
+    /// will treat it as disabled regardless current network status.
+    pub fn set_override_iface(&mut self, value: bool) -> &mut Self {
+        self.override_iface = value;
+        self
+    }
+
     /// Create empty [NetworkState]
     pub fn new() -> Self {
         Default::default()
@@ -274,7 +242,19 @@ impl NetworkState {
             Ok(s) => Ok(s),
             Err(e) => Err(NmstateError::new(
                 ErrorKind::InvalidArgument,
-                format!("Invalid json string: {e}"),
+                format!("Invalid JSON string: {e}"),
+            )),
+        }
+    }
+
+    /// Wrapping function of [serde_yaml::from_str()] with error mapped to
+    /// [NmstateError].
+    pub fn new_from_yaml(net_state_yaml: &str) -> Result<Self, NmstateError> {
+        match serde_yaml::from_str(net_state_yaml) {
+            Ok(s) => Ok(s),
+            Err(e) => Err(NmstateError::new(
+                ErrorKind::InvalidArgument,
+                format!("Invalid YAML string: {e}"),
             )),
         }
     }
@@ -293,6 +273,15 @@ impl NetworkState {
         ))
     }
 
+    #[cfg(not(feature = "query_apply"))]
+    pub async fn retrieve_async(&mut self) -> Result<&mut Self, NmstateError> {
+        Err(NmstateError::new(
+            ErrorKind::DependencyError,
+            "NetworkState::retrieve_async() need `query_apply` feature enabled"
+                .into(),
+        ))
+    }
+
     /// Replace secret string with `<_password_hid_by_nmstate>`
     pub fn hide_secrets(&mut self) {
         self.interfaces.hide_secrets();
@@ -300,6 +289,14 @@ impl NetworkState {
 
     #[cfg(not(feature = "query_apply"))]
     pub fn apply(&mut self) -> Result<(), NmstateError> {
+        Err(NmstateError::new(
+            ErrorKind::DependencyError,
+            "NetworkState::apply() need `query_apply` feature enabled".into(),
+        ))
+    }
+
+    #[cfg(not(feature = "query_apply"))]
+    pub async fn apply_async(&mut self) -> Result<(), NmstateError> {
         Err(NmstateError::new(
             ErrorKind::DependencyError,
             "NetworkState::apply() need `query_apply` feature enabled".into(),
@@ -339,14 +336,15 @@ impl NetworkState {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MergedNetworkState {
+    pub(crate) interfaces: MergedInterfaces,
     pub(crate) hostname: MergedHostNameState,
     pub(crate) dns: MergedDnsState,
-    pub(crate) interfaces: MergedInterfaces,
+    pub(crate) ovn: MergedOvnConfiguration,
     pub(crate) ovsdb: MergedOvsDbGlobalConfig,
     pub(crate) routes: MergedRoutes,
     pub(crate) rules: MergedRouteRules,
     pub(crate) memory_only: bool,
-    pub(crate) prop_list: Vec<&'static str>,
+    pub(crate) override_iface: bool,
 }
 
 impl MergedNetworkState {
@@ -356,6 +354,11 @@ impl MergedNetworkState {
         gen_conf_mode: bool,
         memory_only: bool,
     ) -> Result<Self, NmstateError> {
+        let mut current = current;
+        if desired.override_iface {
+            current.interfaces = current.interfaces.clone_name_type_only();
+        };
+
         let interfaces = MergedInterfaces::new(
             desired.interfaces,
             current.interfaces,
@@ -374,15 +377,26 @@ impl MergedNetworkState {
         let hostname =
             MergedHostNameState::new(desired.hostname, current.hostname);
 
+        let ovn = MergedOvnConfiguration::new(desired.ovn, current.ovn)?;
+
+        let ovsdb = MergedOvsDbGlobalConfig::new(
+            desired.ovsdb,
+            current.ovsdb.unwrap_or_default(),
+        )?;
+
         let ret = Self {
             interfaces,
             routes,
             rules,
-            dns: MergedDnsState::new(desired.dns, current.dns)?,
-            ovsdb: MergedOvsDbGlobalConfig::new(desired.ovsdb, current.ovsdb),
+            dns: MergedDnsState::new(
+                desired.dns,
+                current.dns.unwrap_or_default(),
+            )?,
+            ovn,
+            ovsdb,
             hostname,
             memory_only,
-            prop_list: desired.prop_list,
+            override_iface: desired.override_iface,
         };
         ret.validate_ipv6_link_local_address_dns_srv()?;
 

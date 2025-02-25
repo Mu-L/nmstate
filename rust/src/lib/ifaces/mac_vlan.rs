@@ -44,19 +44,24 @@ impl MacVlanInterface {
         Self::default()
     }
 
-    pub(crate) fn sanitize(&self) -> Result<(), NmstateError> {
-        if let Some(conf) = &self.mac_vlan {
-            if conf.accept_all_mac == Some(false)
-                && conf.mode != MacVlanMode::Passthru
-            {
-                let e = NmstateError::new(
-                    ErrorKind::InvalidArgument,
-                    "Disable accept-all-mac-addresses(promiscuous) \
+    pub(crate) fn sanitize(
+        &self,
+        is_desired: bool,
+    ) -> Result<(), NmstateError> {
+        if is_desired {
+            if let Some(conf) = &self.mac_vlan {
+                if conf.accept_all_mac == Some(false)
+                    && conf.mode != MacVlanMode::Passthru
+                {
+                    let e = NmstateError::new(
+                        ErrorKind::InvalidArgument,
+                        "Disable accept-all-mac-addresses(promiscuous) \
                     is only allowed on passthru mode"
-                        .to_string(),
-                );
-                log::error!("{}", e);
-                return Err(e);
+                            .to_string(),
+                    );
+                    log::error!("{}", e);
+                    return Err(e);
+                }
             }
         }
         Ok(())
@@ -64,6 +69,12 @@ impl MacVlanInterface {
 
     pub(crate) fn parent(&self) -> Option<&str> {
         self.mac_vlan.as_ref().map(|cfg| cfg.base_iface.as_str())
+    }
+
+    pub(crate) fn change_parent_name(&mut self, name: &str) {
+        if let Some(mac_vlan_conf) = self.mac_vlan.as_mut() {
+            mac_vlan_conf.base_iface = name.to_string();
+        }
     }
 }
 

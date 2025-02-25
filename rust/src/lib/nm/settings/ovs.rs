@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::iter::FromIterator;
 
 use super::super::nm_dbus::{
-    NmConnection, NmRange, NmSettingOvsDpdk, NmSettingOvsExtIds,
+    NmConnection, NmIfaceType, NmRange, NmSettingOvsDpdk, NmSettingOvsExtIds,
     NmSettingOvsIface, NmSettingOvsOtherConfig, NmSettingOvsPatch,
 };
 use super::super::settings::connection::gen_nm_conn_setting;
 
 use crate::{
-    BaseInterface, BridgePortTunkTag, Interface, InterfaceType, NmstateError,
-    OvsBridgeBondMode, OvsBridgeInterface, OvsBridgePortConfig,
-    OvsDbIfaceConfig, OvsInterface, UnknownInterface,
+    BaseInterface, BridgePortTrunkTag, Interface, InterfaceType,
+    MergedInterfaces, NmstateError, OvsBridgeBondMode, OvsBridgeInterface,
+    OvsBridgePortConfig, OvsDbIfaceConfig, OvsInterface, UnknownInterface,
 };
 
 pub(crate) fn create_ovs_port_nm_conn(
@@ -23,13 +22,17 @@ pub(crate) fn create_ovs_port_nm_conn(
 ) -> Result<NmConnection, NmstateError> {
     let mut nm_conn = exist_nm_conn.cloned().unwrap_or_default();
     let mut base_iface = BaseInterface::new();
-    base_iface.name = port_conf.name.clone();
+    base_iface.name.clone_from(&port_conf.name);
     base_iface.iface_type = InterfaceType::Other("ovs-port".to_string());
     base_iface.controller = Some(br_name.to_string());
     base_iface.controller_type = Some(InterfaceType::OvsBridge);
     let mut iface = UnknownInterface::new();
     iface.base = base_iface;
-    gen_nm_conn_setting(&Interface::Unknown(iface), &mut nm_conn, stable_uuid)?;
+    gen_nm_conn_setting(
+        &Interface::Unknown(Box::new(iface)),
+        &mut nm_conn,
+        stable_uuid,
+    )?;
 
     let mut nm_ovs_port_set =
         nm_conn.ovs_port.as_ref().cloned().unwrap_or_default();
@@ -83,7 +86,7 @@ pub(crate) fn create_ovs_port_nm_conn(
     Ok(nm_conn)
 }
 
-fn trunk_tag_to_nm_range(trunk_tag: &BridgePortTunkTag) -> NmRange {
+fn trunk_tag_to_nm_range(trunk_tag: &BridgePortTrunkTag) -> NmRange {
     let mut ret = NmRange::default();
     let (vid_min, vid_max) = trunk_tag.get_vlan_tag_range();
     ret.start = vid_min.into();
@@ -119,7 +122,7 @@ pub(crate) fn gen_nm_ovs_br_setting(
 
     if let Some(br_conf) = &ovs_br_iface.bridge {
         if let Some(br_opts) = &br_conf.options {
-            nm_ovs_br_set.stp = br_opts.stp;
+            nm_ovs_br_set.stp = br_opts.stp.as_ref().and_then(|s| s.enabled);
             nm_ovs_br_set.rstp = br_opts.rstp;
             nm_ovs_br_set.mcast_snooping_enable = br_opts.mcast_snooping_enable;
             if let Some(fail_mode) = &br_opts.fail_mode {
@@ -161,6 +164,8 @@ pub(crate) fn gen_nm_ovs_iface_setting(
             let mut nm_ovs_dpdk = NmSettingOvsDpdk::default();
             nm_ovs_dpdk.devargs = Some(dpdk_iface.devargs.to_string());
             nm_ovs_dpdk.n_rxq = dpdk_iface.rx_queue;
+            nm_ovs_dpdk.n_rxq_desc = dpdk_iface.n_rxq_desc;
+            nm_ovs_dpdk.n_txq_desc = dpdk_iface.n_txq_desc;
             nm_conn.ovs_dpdk = Some(nm_ovs_dpdk);
             nm_conn.ovs_iface = Some(nm_ovs_iface_set);
         }
@@ -209,5 +214,32 @@ pub(crate) fn gen_nm_iface_ovs_db_setting(
         nm_conn.ovs_ext_ids = None;
     } else if let Some(conf) = iface.base_iface().ovsdb.as_ref() {
         apply_iface_ovsdb_conf(conf, nm_conn);
+    }
+}
+
+pub(crate) fn fix_ovs_iface_controller_setting(
+    iface: &Interface,
+    nm_conn: &mut NmConnection,
+    merged_ifaces: &MergedInterfaces,
+) {
+    let ovs_port_name = merged_ifaces
+        .user_ifaces
+        .get(&(
+            iface.base_iface().controller.clone().unwrap_or_default(),
+            InterfaceType::OvsBridge,
+        ))
+        .and_then(|i| {
+            if let Interface::OvsBridge(br_iface) = &i.merged {
+                Some(br_iface)
+            } else {
+                None
+            }
+        })
+        .and_then(|br_iface| get_ovs_port_name(br_iface, iface.name()))
+        .unwrap_or_else(|| iface.name().to_string());
+
+    if let Some(nm_conn_set) = nm_conn.connection.as_mut() {
+        nm_conn_set.controller_type = Some(NmIfaceType::OvsPort);
+        nm_conn_set.controller = Some(ovs_port_name);
     }
 }

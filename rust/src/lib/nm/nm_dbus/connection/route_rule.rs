@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Copyright 2021 Red Hat, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,11 +17,14 @@
 
 use std::convert::TryFrom;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use super::super::{connection::DbusDictionary, error::NmError};
+use super::super::{
+    connection::{DbusDictionary, DBUS_ASV_SIGNATURE},
+    error::NmError,
+};
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(try_from = "DbusDictionary")]
 #[non_exhaustive]
 pub struct NmIpRouteRule {
@@ -34,6 +39,7 @@ pub struct NmIpRouteRule {
     pub fw_mask: Option<u32>,
     pub iifname: Option<String>,
     pub action: Option<NmIpRouteRuleAction>,
+    pub suppress_prefixlength: Option<i32>,
     _other: DbusDictionary,
 }
 
@@ -53,6 +59,11 @@ impl TryFrom<DbusDictionary> for NmIpRouteRule {
             iifname: _from_map!(v, "iifname", String::try_from)?,
             action: _from_map!(v, "action", u8::try_from)?
                 .map(NmIpRouteRuleAction::from),
+            suppress_prefixlength: _from_map!(
+                v,
+                "suppress-prefixlength",
+                i32::try_from
+            )?,
             _other: v,
         })
     }
@@ -61,8 +72,8 @@ impl TryFrom<DbusDictionary> for NmIpRouteRule {
 impl NmIpRouteRule {
     pub(crate) fn to_value(&self) -> Result<zvariant::Value, NmError> {
         let mut ret = zvariant::Dict::new(
-            zvariant::Signature::from_str_unchecked("s"),
-            zvariant::Signature::from_str_unchecked("v"),
+            &zvariant::Signature::Str,
+            &zvariant::Signature::Variant,
         );
         if let Some(v) = &self.family {
             ret.append(
@@ -130,6 +141,12 @@ impl NmIpRouteRule {
                 zvariant::Value::new(zvariant::Value::new(u8::from(*v))),
             )?;
         }
+        if let Some(v) = &self.suppress_prefixlength {
+            ret.append(
+                zvariant::Value::new("suppress-prefixlength"),
+                zvariant::Value::new(zvariant::Value::new(v)),
+            )?;
+        }
 
         for (key, value) in self._other.iter() {
             ret.append(
@@ -154,8 +171,8 @@ pub(crate) fn parse_nm_ip_rule_data(
 pub(crate) fn nm_ip_rules_to_value(
     nm_rules: &[NmIpRouteRule],
 ) -> Result<zvariant::Value, NmError> {
-    let mut rule_values =
-        zvariant::Array::new(zvariant::Signature::from_str_unchecked("a{sv}"));
+    let mut rule_values = zvariant::Array::new(DBUS_ASV_SIGNATURE);
+
     for nm_rule in nm_rules {
         rule_values.append(nm_rule.to_value()?)?;
     }
@@ -166,7 +183,7 @@ const RTN_BLACKHOLE: u8 = 6;
 const RTN_UNREACHABLE: u8 = 7;
 const RTN_PROHIBIT: u8 = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum NmIpRouteRuleAction {
     Blackhole,
@@ -196,6 +213,17 @@ impl From<NmIpRouteRuleAction> for u8 {
             NmIpRouteRuleAction::Unreachable => RTN_UNREACHABLE,
             NmIpRouteRuleAction::Prohibit => RTN_PROHIBIT,
             NmIpRouteRuleAction::Other(d) => d,
+        }
+    }
+}
+
+impl std::fmt::Display for NmIpRouteRuleAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NmIpRouteRuleAction::Blackhole => write!(f, "blackhole"),
+            NmIpRouteRuleAction::Unreachable => write!(f, "unreachable"),
+            NmIpRouteRuleAction::Prohibit => write!(f, "prohibit"),
+            NmIpRouteRuleAction::Other(d) => write!(f, "{}", d),
         }
     }
 }

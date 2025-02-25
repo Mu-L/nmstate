@@ -1,30 +1,515 @@
 # Changelog
-### [2.2.6] - 2023-02-09
-### New features
-- Support Tokenised IPv6 identifiers. (91f8e45c)
-- Support local(255) route table. (a2051822)
-- Support enabling SR-IOV and use future VF in single desire state. (20871bac)
-
-### Bug fixes
-- Fix error when removing a port with IP enabled. (23cf28d7)
-- Fix error when bringing down an unmanaged interface. (50148b63)
-- Treat empty string to match None in routes. (b52557b9)
-
-#### [2.2.5] - 2023-01-26
-### New features
-- Support ECMP IPv4 routes. (b1b275cd)
-- Support OVS DPDK `n_rxq_desc` and `n_txq_desc` options. (936ac46a)
-- Support arbitrary DNS configuration. (a9397549)
-
-### Bug fixes
-- Fix route destination address validation error. (012052c3)
-- Fix route next-hop-interface missing validation. (40970942)
-- Fix error when new DNS interface hold IPv6 link local address only. (4e21e359)
-- Fix error when adding an OVS internal interface to an empty OVS bridge. (d6cd548f)
-
-### [2.2.4] - 2023-01-18
+## [2.2.41] - 2025-02-23
 ### Breaking changes
-- Support interface level `other_config`. (8ec213b8)
+ - Minimum supported rust version bump to 1.77. (41c9f6582)
+
+### New features
+ - Refer parent by profile name. (3a17e4e2)
+ - Refer port by profile name. (cf1cfa9e)
+
+### Bug fixes
+ - gen_revert: Include current interface if desire is absent. (24253550)
+ - ovsdb: return an error if ovsdb socket is not available when applying. (3d514163)
+ - rust: Migrate zbus v1 to V5. (41c9f658)
+ - ovsdb: Use incremental change instead of overriding. (b43dedc7)
+ - apply: Support overriding interface configuration without merging. (216bf430)
+ - cli: Unify the state reading function. (8bf6cc71)
+
+## [2.2.40] - 2024-01-24
+### Breaking changes
+ - N/A
+
+### New features
+ - python: use a dedicated logger for libnmstate called "libnmstate". (c2fdbb9)
+
+### Bug fixes
+ - route: don't bring connection down to remove routes. (d658938)
+ - mptcp: don't bring connection down if mptcp flags didn't change. (bd25001)
+
+## [2.2.39] - 2024-11-20
+### Breaking changes
+ - N/A
+
+### New features
+ - N/A
+
+### Bug fixes
+ - route: correctly compare the route's table and metric. (2ce6cb15)
+ - route: correctly compare the route's next-hop. (b4f1aa61)
+
+## [2.2.38] - 2024-10-24
+### Breaking changes
+ - N/A
+
+### New features
+ - N/A
+
+### Bug fixes
+ - nm ovs: Enable connection.autoconnect-ports for OVS port. (4c996abd)
+ - gc: Fix trunk vlans for ovs port in gen_conf. (614c66dc)
+ - nm: Preserve current IP setting for multiconnect profile. (23247afb)
+
+## [2.2.37] - 2024-09-30
+### Breaking changes
+ - N/A
+
+### New features
+ - IPVLAN interface support. (50c267c9)
+
+### Bug fixes
+ - mac identifier: Fix error when attaching mac-based iface to bond. (0ebf1078)
+ - packaging: Generate vendor tarbal for Rust 1.66 also. (2ef57297)
+ - async: Use tokio::time::sleep in stead of std::thread::sleep. (b6e7adec)
+ - policy: Sort the capture base on dependent relationship. (71ea2399)
+ - nm: Handle `ipv6.method: ignore`. (3456e97b)
+ - nm: Fix profile name changing. (a44f555a)
+ - nm route rule: Only search desired interface for storing route rule. (36af0f85)
+ - policy: Fix capture full state with simple line. (58389eee)
+ - policy: Fix error when capture is mentioned in the right. (245fcb16)
+
+## [2.2.36] - 2024-09-19
+### Breaking changes
+ - N/A
+
+### New features
+ - ipsec: support require-id-on-certificate. (90a56cc0)
+ - route: Add support for route source. (d4487de1)
+ - gen_conf: Support special route type. (2207c40b)
+
+### Bug fixes
+ - mptcp: Treat none as empty MPTCP flags in current state when verifying. (755333cb)
+ - nm dns: Re-evaluate DNS settings if desired even not changed. (9fe7836c)
+ - vrf: Skip serializing if port is undefined. (fa013cc3)
+
+## [2.2.35] - 2024-08-20
+### Breaking changes
+ - Rust API: `VrfConfig.table_id` changed `u32` to `Option<u32>`.(2900bf5e)
+ - Rust API: Use Box to wrap Interface enum entries. (5d5319ca)
+
+### New features
+ - Add 802.1x PEAP auth. (f43657da)
+
+### Bug fixes
+ - nm: Fix incorrect device-reapply call. (b1255c3d, 19e60c17)
+ - nm: Change unknown device state log to debug. (20d72e7e)
+ - nm: send lldp with correct D-Bus type INT32. (35557b0d)
+ - gen_diff: Include context information for `gen_diff()`. (c34563d9)
+ - gen_diff: Use original desired interface when creating new interface. (ee8c8a26)
+
+## [2.2.34] - 2024-08-01
+### Breaking changes
+ - Set Minimum Supported Rust Version to 1.66. (ef4a5e58)
+
+### New features
+ - N/A
+
+### Bug fixes
+ - ovs bond: Deny unknown fields in ovs bond section. (d8453ea0)
+ - vlan: make 'base-iface' optional for the desired state. (bd3cbc82)
+ - nm: Increase reapply failure log to info level. (2600188b)
+ - mac identifier: Prefer permanent MAC address. (bf4ff6c9)
+
+## [2.2.33] - 2024-06-13
+### Breaking changes
+ - N/A
+
+### New features
+ - Provide permanent-mac-address when querying. (9d0f8c01)
+ - Add support of SRIOV drivers-autoprobe (05d6b996)
+ - Support DNS modification in kernel mode. (ddb04e8d)
+ - Support modification of static route in kernel mode. (4088e470)
+ - Add description to top level YAML/JSON API. (bb9981c7)
+
+### Bug fixes
+ - Fix error when purging DNS with empty server. (0a86028b)
+ - Validate interface in desired port list of controller. (18677227)
+ - Fix incorrect check on whether `vlan-default-pvid` changed. (018b91a9)
+
+## [2.2.32] - 2024-05-30
+### Breaking changes
+ - N/A
+
+### New features
+ - C/Python binding: tidy up the input network state. (e5ecc3ce)
+ - C/Python binding: Add support of `NetworkState::gen_diff()`. (9b7d882c)
+ - rust: Provide async API. (486fab1c)
+
+### Bug fixes
+ - cli: Replace `ctrlc` crate with `tokio/signal`. (c67fc1d8)
+ - vlan: Default `reorder-headers: true`. (a907b00e)
+ - ip: Fix routes on empty address. (56d0749e)
+ - ovs: Warn user when cannot connect OVS daemon but desired. (ca33ca51)
+
+## [2.2.31] - 2024-05-09
+### Breaking changes
+ - N/A
+
+### New features
+ - IPSec: Add support to `leftsubnet` property. (d03a52f5)
+
+### Bug fixes
+ - N/A
+
+## [2.2.30] - 2024-05-03
+### Breaking changes
+ - N/A
+
+### New features
+ - Add support to IPSec libreswan rightcert property. (19755bc)
+
+### Bug fixes
+ - Fix bridge port vlan refreshing if `vlan-default-pvid` changed. (4cdc816)
+ - Do not allow bond port queue ID to overlap. (286d61c)
+ - Fix referring to controller/parent when it is in-memory. (98f9155)
+
+## [2.2.29] - 2024-04-24
+### Breaking changes
+ - N/A
+
+### New features
+ - N/A
+
+### Bug fixes
+ - Fix compilation on Rust 1.66. (f47eb86)
+
+## [2.2.28] - 2024-04-22
+### Breaking changes
+ - N/A
+
+### New features
+ - New nmstatectl alias for show and apply, "s" and "a". (7c6d155)
+
+### Bug fixes
+ - Hide secrets in Debug trait of NetworkState. (649d443)
+ - Always show vet interface with veth type. (115bcc5)
+ - Normalize route table of current route when determining route removed. (96a5c77)
+
+## [2.2.27] - 2024-03-20
+### Breaking changes
+ - N/A
+
+### New features
+ - Support TCP congestion window(cwnd) in route. (59f99632)
+ - Support query interface driver. (67817c23)
+ - New API to generate changed state. (fe5327a2)
+
+### Bug fixes
+ - Include driver information for `persist-nic-names` subcommand. (1129e46b)
+ - nm: Protect global DNS config in checkpoint. (881373ba)
+ - route rule: Append rule instead of overriding when iface defined. (88d3d3ef)
+
+## [2.2.26] - 2024-03-13
+### Breaking changes
+ - Deprecate PrettyState class in Python API. (6b410dcf)
+
+### New features
+ - Allowing input multiple desire states for statistics. (9b808821)
+
+### Bug fixes
+ - packaging: Fix rpm build on Fedora. (c40f3ff0)
+ - route: warn if the route is missing due to NM delay. (71dedc65)
+ - Raise invalid argument error when desired OVS bridge with MAC. (a71eed31)
+ - Auto managed ignored OVS port. (c7fd32e8)
+ - Fix resolving token in array items for nmpolicy. (58a2fd6d)
+
+## [2.2.25] - 2024-02-22
+### Breaking changes
+ - Removed the support of deprecated `slaves` in linux bridge, ovs bridge and
+   bond. Please use `ports` instead. (2657650c, 51bdb012)
+
+### New features
+ - Support MacSec hardware offload. (1198339e)
+
+### Bug fixes
+ - ipsec: Treat DHCPv4 off with no static address as IPv4 disabled. (4d0f0829)
+ - controller: Fix incorrect ports name matching when validating ports. (6dc9e880)
+
+## [2.2.24] - 2024-02-08
+### Breaking changes
+ - Rust API: base_iface: Remove `prop_list`. (42936b17)
+ - Rust API: ip: Remove the `prop_list` property. (bae6adb3)
+ - Rust API: net_state: Remove `prop_list`. (85dbacc4)
+ - Increase minimum supported NetworkManager version to 1.40. (511e83b4)
+
+### New features
+ - Add support of deprecated `slaves` property in ovs bond. (9565b963)
+ - Support assigning static routes to interface without addresses. (fc4c72e6)
+
+### Bug fixes
+ - cli service: Allow user to opt-in on not deleting applied file. (733deba3)
+ - ncl: Fix description of rollback command. (6698891e)
+ - manpage: Fix incorrect document on `nmstatectl service`. (a6b0ab1d)
+ - nm ipsec: Fix bug on modifying exist ipsec connection. (d64baf98)
+ - route: Allow route destination `0.0.0.0/8` for non-unicast route. (25a73384)
+ - Makefile: fix python install path for Python >= 3.12. (dd0c5aec)
+
+## [2.2.23] - 2024-01-17
+### Breaking changes
+ - N/A
+
+### New features
+ - ipsec: Support `type`, `hostaddrfamily` and `clientaddrfamily` options. (d7d62db5)
+ - ipsec: Add support of P2P IPSec tunnel. (74681912)
+
+### Bug fixes
+ - clib: Use build.rs to fix SONAME. (a199caf9)
+ - rpm: Fix SONAME in RHEL 9 build. (57b1880b)
+ - ip: Do not skip serializing allow-extra-address: false. (1f532a90)
+ - ovs: Do not skip serializing `allow-extra-patch-ports`. (4023bd25)
+ - base_iface: Do not skip serializing `copy-mac-from`. (f4139ad2)
+ - ovn: Do not skip serializing state: absent. (8a63a7c0)
+
+## [2.2.22] - 2024-01-05
+### Breaking changes
+ - N/A
+
+### New features
+ - Add support to HSR/PRP interface. (b23da648)
+ - Add sriov vlan protocol support. (d2248623, b4981756)
+
+### Bug fixes
+ - package: Ignore minimum rust version. (108e0451)
+ - service: Mark .applied with checksum. (dbb98e1d)
+ - Cargo: Use optional dependency instead of internal feature. (9e4a36f5)
+ - lldp: Simplify rust structs and serde. (ac1eb9d4)
+ - ipsec: Fix error when `ipsec-interface` set to yes or a number. (9203d781)
+
+## [2.2.21] - 2023-12-14
+### Breaking changes
+ - N/A
+
+### New features
+ - Support VLAN flags. (5780fccc)
+ - Support `ipsec-interface`, `authby` and DPD options. (c81fa8a0)
+
+### Bug fixes
+ - Fix error on NetworkManager does not support bond-port. (e1ee8ea0)
+ - CLI: Do not exit with error if stamp or systemd folder not found. (1e76eeb3)
+ - Use new nispor 1.2.15 which fixes error on new kernel. (efe4c20d)
+ - ipsec: Fix VerificationError on `leftrsasigkey: '%cert'`. (1420fb0e)
+
+## [2.2.20] - 2023-11-30
+### Breaking changes
+ - Changed query output `valid-left` to `valid-life-time`. (c2809592)
+
+### New features
+ - Add support for the `route-type`. (f8c57a88)
+ - Support generate statistic data. (54f4d6dd)
+
+### Bug fixes
+ - Fix `ipv4.dhcp-timeout` even when ip not desired. (6b6caeec)
+ - Drop the filtering for the nispor loopback routes. (af88bb24)
+
+## [2.2.19] - 2023-11-15
+### Breaking changes
+ - N/A
+
+### New features
+ - Support IpSec tunnel. (4a88d33d, 626714e3)
+
+### Bug fixes
+ - brdige/bond: Add support of `slaves` back as deprecated. (631ff655)
+ - dns: Fix purging DNS config. (ab07783b)
+ - dns: Fix DNS option `ndots`, `timeout` and `attempts`. (75e2f042)
+ - ip: Do not convert auto IP to static IP. (a3ae6e3a)
+ - clib: Fix SONAME for all linux build target. (0f8026e8)
+ - go: Configure GOPROXY and GOSUMDB. (661ffd89)
+
+## [2.2.18] - 2023-11-02
+### Breaking changes
+ - ovs: Align STP property of OVS bridge and Linux bridge. (2934b894)
+
+### New features
+ - nmpolicy: Allowing remove a property or section. (7b99493a)
+ - Support appending static DNS before dynamic DNS. (56ecba6f)
+
+### Bug fixes
+ - SRIOV: Fix VerificationError on switchdev mode SRIOV. (3fcf1386)
+ - nm: Fix `gc` mode for route rule action. (2ee3aaf9)
+ - nm: Suppress unused_imports warning for nm_dbus. (0a01c28a)
+## [2.2.17] - 2023-10-19
+### Breaking changes
+ - macsec: rename parent property to base-iface. (ccc6882b)
+
+### New features
+ - Support invoking dispatch script. (1bd1151d)
+ - Support generate new network state to revert. (ab18b302)
+ - Support for bond ports config. (4538b0a1)
+
+### Bug fixes
+ - ovn: Tidy up the ovs/ovn code. (c2d31e6a)
+ - ip: validate prefix_length. (107382a9)
+ - ip: don't check "ipv4 in ipv6" in sanitize without error checking.
+   (a579e041)
+
+## [2.2.16] - 2023-09-21
+### Breaking changes
+ - N/A
+
+### New features
+ - Support to MACsec interface. (14d307f2)
+ - Support DNS options. (b77a1883)
+
+### Bug fixes
+ - Deny unknown field for global and iface ovsdb. (6baaa5ae)
+ - Fix nmstatectl `persist-nic-names` on bond port. (2a2e36c1)
+
+## [2.2.15] - 2023-08-23
+### Breaking changes
+ - N/A
+
+### New features
+ - N/A
+
+### Bug fixes
+ - OVN: mappings changes do not clear ext ids keys. (f0e5a8e6)
+ - Fix DNS changes with OVS geneve interface holding IP. (dffaa0b0)
+
+## [2.2.14] - 2023-07-26
+### Breaking changes
+ - Changed `EthtoolFeatureConfig` from type alias of HashMap into
+   `struct` (37a100f5). No YAML/JSON API changes for this.
+
+### New features
+ - Support route rule option suppress-prefix-length. (b42197ae)
+ - New OVS `allow-extra-patch-ports` option. (769fe911)
+
+### Bug fixes
+ - Fix ECMP route in `gen_conf` mode. (fe6002aa)
+ - Preserve gateway when not desired. (2b766619)
+
+## [2.2.13] - 2023-07-12
+### Breaking changes
+ - N/A
+
+### New features
+ - Support OVN mapping. (72b54fd9, 2efba01b, 6a87b702, 1a57b595, af2ffc39)
+ - Support bond `arp_missed_max` option. (aeae2f7d, bbe63918)
+
+### Bug fixes
+ - Fix SR-IOV retry. (407f68fc)
+ - Remove dependency on ipnet crate. (28e7d052)
+ - Handle unknown interface type for SRIOV. (8764f450)
+ - Perform pre-apply check before creating checkpoint. (c4b25a77)
+ - Fix regression on waiting SRIOV. (bbd091cc)
+
+## [2.2.12] - 2023-06-01
+### Breaking changes
+ - Rust API: BridgePortTunkTag renamed as BridgePortTrunkTag. (148ecd1)
+
+### New features
+ - Support `vlan-default-pvid` in bridge options. (e73b147)
+
+### Bug fixes
+ - Fix rollback blocked due to waiting for DHCP. (861110b)
+ - Fix creating a VLAN or bridge above an interface with multiple NM profiles. (a463a28)
+
+## [2.2.11] - 2023-05-16
+### Breaking changes
+ - N/A
+
+### New features
+ - Support OVS DPDK `netdev` datapath. (ac8a4dee)
+
+### Bug fixes
+ - Skip connection activation if its controller will do. (7f93c374)
+ - Fix error when DHCP with auto IP address on STP enabled bridge. (8ea675b6)
+ - Fix error when running test locally. (21d63ed6)
+ - Do nothing for `persist-nic-names` when got `net.ifnames=0`. (c9fd1e80)
+ - Include cargo vendor files for s390 linux. (dc6a2149)
+
+## [2.2.10] - 2023-04-20
+### Breaking changes
+ - N/A
+
+### New features
+ - Added CLI hiden `persist-nic-names` subcommand for OpenShift. (6f95011e,
+   03c7b03b, 5f4ede55)
+ - Support static IP address on with auto ip stack. (334fcf2e)
+ - Support static DNS search with auto DNS nameserver. (b222d5b1)
+ - Support matching interface with MAC address. (508bbe74)
+ - Support DHCP hostname/FQDN option. (ebe3fc86)
+
+### Bug fixes
+ - Ignore `dhcp-client-id` when DHCPv4 disabled. (16b42e0e)
+ - Validate IP address type matching with ip stack type. (5f1107fd)
+
+## [2.2.9] - 2023-03-23
+### Breaking changes
+ - N/A
+
+### New features
+ - cli: New subcommand `format`. (4f8c1af5)
+ - Including `controller` property on query. (85b682e9)
+
+### Bug fixes
+ - Do not use current interface which is unmanaged/external managed. (221521e2)
+ - Fix problem when consuming down interface in bridge/bond/etc. (1728ae21)
+ - cli: Ignore failure when reading /etc/nmstate folder. (2c03f3c1)
+ - nmstate.service: remain after exit. (beb2fee9)
+ - nmstate.service: Fix the dependency chain in systemd. (8bef2741, 9971c1ca)
+ - Fix problem when changing veth peer. (a6a32a3f)
+
+## [2.2.8] - 2023-03-10
+### Breaking changes
+ - N/A
+
+### New features
+ - Add VXLAN properties for EVPN use. (5a0ca407)
+ - Support policy file in service mode. (2dc296e2)
+ - clib: Introduce YAML support. (c40cbcb8)
+
+### Bug fixes
+ - Retry when NetworkManager starting up. (393828a6)
+ - Fix `n-rxq-desc` and `n-txq-desc` properties. (b234f9dd)
+ - Fix random failure when changing VLAN protocol. (b12effd5)
+ - Fix fetching loopback information from NM plugin. (d3864c19)
+ - Fix `make install` on Debian and Ubuntu. (4647cd11)
+ - Adjust `is_match` to consider family and priority 0. (811db479)
+
+## [2.2.7] - 2023-02-16
+### Breaking changes
+ - N/A
+
+### New features
+ - Support static route with auto ip. (4fa5689a)
+ - Support VLAN 802.1ad and 802.1q protocol. (9923657a)
+ - Support enabling SR-IOV and use future VF in single desire state. (20871bac)
+
+### Bug fixes
+ - Fix error when reverting SR-IOV VFs conf to default. (3bbb3c21)
+ - Fix SR-IOV enabling and use in single desire state. (8f680180)
+ - Use loopback interface as final fallback interface to store route rule. (fb7ace9d)
+
+## [2.2.6] - 2023-02-09
+### Breaking changes
+ - N/A
+
+### New features
+ - Support Tokenised IPv6 identifiers. (91f8e45c)
+ - Support local(255) route table. (a2051822)
+ - Support enabling SR-IOV and use future VF in single desire state. (20871bac)
+
+### Bug fixes
+ - Fix error when removing a port with IP enabled. (23cf28d7)
+ - Fix error when bringing down an unmanaged interface. (50148b63)
+ - Treat empty string to match None in routes. (b52557b9)
+
+## [2.2.5] - 2023-01-26
+### New features
+ - Support ECMP IPv4 routes. (b1b275cd)
+ - Support OVS DPDK `n_rxq_desc` and `n_txq_desc` options. (936ac46a)
+ - Support arbitrary DNS configuration. (a9397549)
+
+### Bug fixes
+ - Fix route destination address validation error. (012052c3)
+ - Fix route next-hop-interface missing validation. (40970942)
+ - Fix error when new DNS interface hold IPv6 link local address only. (4e21e359)
+ - Fix error when adding an OVS internal interface to an empty OVS bridge. (d6cd548f)
+
+## [2.2.4] - 2023-01-18
+### Breaking changes
+ - Support interface level `other_config`. (8ec213b8)
 
 The rust API changed: `OvsBridgeBondConfig.other_config: Option<HashMap>`
 changed to `OvsBridgeBondConfig.ovs_db: Option<OvsDbIfaceConfig>`.
@@ -33,12 +518,12 @@ The YAML API changed: The `other_config` under OVS bond should be stored under
 `ovs-db` section.
 
 ### Bug fixes
-- Fix support DNS uncompressed IPv6 server. (8fbb93a5)
-- Fix validation error on route rule when `ip-to` and `ip-from` is empty string. (c2e69269)
-- Fix `group-fwd-mask` conflict with `group-forward-mask` Linux bridge option. (e079f1d)
-- Fix partial detaching ports in OVS bond interfaces. (e2b3ea72)
-- Fix verification error when OVS daemon is off. (ae3f45a7)
-- Fix MPTCP error in older NetworkManager. (f38da12c)
+ - Fix support DNS uncompressed IPv6 server. (8fbb93a5)
+ - Fix validation error on route rule when `ip-to` and `ip-from` is empty string. (c2e69269)
+ - Fix `group-fwd-mask` conflict with `group-forward-mask` Linux bridge option. (e079f1d)
+ - Fix partial detaching ports in OVS bond interfaces. (e2b3ea72)
+ - Fix verification error when OVS daemon is off. (ae3f45a7)
+ - Fix MPTCP error in older NetworkManager. (f38da12c)
 
 ## [2.2.3] - 2023-01-09
 ### Breaking changes
@@ -274,6 +759,7 @@ The YAML API changed: The `other_config` under OVS bond should be stored under
  - Support routes created by iproute command. (f39f763)
  - New property `Inetrface.COPY_FROM_MAC` on bridge and bond interfaces. (b089323)
  - Support IEEE 802.1X authentication. (f9a1da3)
+ - Support `gc` command. (627af31)
 
 ### Bug fixes
  - Fix removing OVS `external_ids` settings. (57e2547)
@@ -335,7 +821,7 @@ The YAML API changed: The `other_config` under OVS bond should be stored under
  - Change NetworkManager plugin as optional. (fc3b311)
  - Keep child interface when bond mode change. (4a7c174)
  - Don't reset bridge options for empty bridge options. (83fd948)
- - Sort routes base on metric and next_hop_address also. (da12b9b)
+ - Sort routes based on metric and next_hop_address also. (da12b9b)
  - Do clean up even checkpoint rollback/destroy failed. (cda87df)
  - The vlan and vxlan interface cannot have ip when subordinated. (ff3b731)
  - Fix None con_profile race condition on SR-IOV interface. (7584d46)

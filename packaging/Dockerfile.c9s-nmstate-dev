@@ -1,6 +1,16 @@
 FROM quay.io/centos/centos:stream9
 
-RUN echo "2022-09-22" > /build_time
+RUN echo "2024-04-09" > /build_time
+
+# Add alter-baseos and alter-appstream repositories with lower priority
+COPY c9s-alter-baseos.repo \
+     /etc/yum.repos.d/c9s-alter-baseos.repo
+COPY c9s-alter-appstream.repo \
+     /etc/yum.repos.d/c9s-alter-appstream.repo
+
+RUN grep -q "^skip_if_unavailable=" /etc/dnf/dnf.conf && \
+    sed -i 's/^skip_if_unavailable=.*/skip_if_unavailable=True/' /etc/dnf/dnf.conf || \
+    echo "skip_if_unavailable=True" >> /etc/dnf/dnf.conf
 
 RUN dnf update -y && \
     dnf -y install dnf-plugins-core epel-release \
@@ -8,11 +18,13 @@ RUN dnf update -y && \
     dnf config-manager --set-enabled crb && \
     dnf -y install --setopt=install_weak_deps=False \
         systemd make go rust-toolset NetworkManager NetworkManager-ovs \
-        NetworkManager-config-server openvswitch2.17 systemd-udev \
-        python3-devel python3-pyyaml python3-setuptools dnsmasq git \
-        iproute rpm-build python3-pytest python3-virtualenv python3-tox \
-        tcpreplay wpa_supplicant hostapd libndp procps-ng dpdk nispor \
-        python3-gobject-base && dnf clean all
+        openvswitch3.4 systemd-udev python3-devel python3-pyyaml \
+        python3-setuptools dnsmasq git iproute rpm-build python3-pytest \
+        python3-virtualenv python3-tox tcpreplay wpa_supplicant hostapd \
+        libndp procps-ng dpdk libreswan NetworkManager-libreswan \
+        && dnf clean all
+
+RUN go env -w GOSUMDB="sum.golang.org" GOPROXY="https://proxy.golang.org,direct"
 
 COPY network_manager_enable_trace.conf \
      /etc/NetworkManager/conf.d/97-trace-logging.conf
@@ -28,8 +40,6 @@ RUN echo net.ipv6.conf.all.disable_ipv6=0 > \
     echo kernel.core_pattern=/exported-artifacts/core.%h.%e.%t > \
     /etc/sysctl.d/01-export-kernel-cores.conf
 
-RUN systemctl enable systemd-udevd NetworkManager openvswitch
-
-#VOLUME [ "/sys/fs/cgroup" ]
+RUN systemctl enable systemd-udevd NetworkManager openvswitch ipsec
 
 CMD ["/usr/sbin/init"]

@@ -12,19 +12,18 @@ pub(crate) fn np_ipv4_to_nmstate(
     running_config_only: bool,
 ) -> Option<InterfaceIpv4> {
     if let Some(np_ip) = &np_iface.ipv4 {
-        let mut ip = InterfaceIpv4::default();
-        ip.prop_list.push("enabled");
-        ip.prop_list.push("addresses");
-        if np_ip.addresses.is_empty() {
-            ip.enabled = false;
+        let mut ip = InterfaceIpv4 {
+            enabled: !np_ip.addresses.is_empty(),
+            enabled_defined: true,
+            ..Default::default()
+        };
+        if !ip.enabled {
             return Some(ip);
         }
-        ip.enabled = true;
         let mut addresses = Vec::new();
         for np_addr in &np_ip.addresses {
             if np_addr.valid_lft != "forever" {
                 ip.dhcp = Some(true);
-                ip.prop_list.push("dhcp");
                 if running_config_only {
                     continue;
                 }
@@ -37,6 +36,16 @@ pub(crate) fn np_ipv4_to_nmstate(
                         np_iface,
                         np_addr.address.as_str(),
                     )),
+                    valid_life_time: if np_addr.valid_lft != "forever" {
+                        Some(np_addr.valid_lft.clone())
+                    } else {
+                        None
+                    },
+                    preferred_life_time: if np_addr.preferred_lft != "forever" {
+                        Some(np_addr.preferred_lft.clone())
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 }),
                 Err(e) => {
@@ -54,7 +63,7 @@ pub(crate) fn np_ipv4_to_nmstate(
         // IP might just disabled
         Some(InterfaceIpv4 {
             enabled: false,
-            prop_list: vec!["enabled"],
+            enabled_defined: true,
             ..Default::default()
         })
     }
@@ -65,16 +74,16 @@ pub(crate) fn np_ipv6_to_nmstate(
     running_config_only: bool,
 ) -> Option<InterfaceIpv6> {
     if let Some(np_ip) = &np_iface.ipv6 {
-        let mut ip = InterfaceIpv6::default();
-        ip.prop_list.push("enabled");
-        ip.prop_list.push("addresses");
-        if np_ip.addresses.is_empty() {
-            ip.enabled = false;
+        let mut ip = InterfaceIpv6 {
+            enabled: !np_ip.addresses.is_empty(),
+            enabled_defined: true,
+            ..Default::default()
+        };
+
+        if !ip.enabled {
             return Some(ip);
         }
-        ip.enabled = true;
         if let Some(token) = np_ip.token.as_ref() {
-            ip.prop_list.push("token");
             ip.token = Some(token.to_string());
         }
 
@@ -82,7 +91,6 @@ pub(crate) fn np_ipv6_to_nmstate(
         for np_addr in &np_ip.addresses {
             if np_addr.valid_lft != "forever" {
                 ip.autoconf = Some(true);
-                ip.prop_list.push("autoconf");
                 if running_config_only {
                     continue;
                 }
@@ -95,6 +103,16 @@ pub(crate) fn np_ipv6_to_nmstate(
                         np_iface,
                         np_addr.address.as_str(),
                     )),
+                    valid_life_time: if np_addr.valid_lft != "forever" {
+                        Some(np_addr.valid_lft.clone())
+                    } else {
+                        None
+                    },
+                    preferred_life_time: if np_addr.preferred_lft != "forever" {
+                        Some(np_addr.preferred_lft.clone())
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 }),
                 Err(e) => {
@@ -112,7 +130,7 @@ pub(crate) fn np_ipv6_to_nmstate(
         // IP might just disabled
         Some(InterfaceIpv6 {
             enabled: false,
-            prop_list: vec!["enabled"],
+            enabled_defined: true,
             ..Default::default()
         })
     }

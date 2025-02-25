@@ -19,6 +19,9 @@ impl NmConnection {
         if let Some(bond_set) = &self.bond {
             sections.push(("bond", bond_set.to_keyfile()?));
         }
+        if let Some(bond_port_set) = &self.bond_port {
+            sections.push(("bond-port", bond_port_set.to_keyfile()?));
+        }
         if let Some(br_set) = &self.bridge {
             sections.push(("bridge", br_set.to_keyfile()?));
         }
@@ -84,6 +87,12 @@ impl NmConnection {
         }
         if let Some(ovs_other_cfgs) = &self.ovs_other_config {
             sections.push(("ovs-other-config", ovs_other_cfgs.to_keyfile()?));
+        }
+        if let Some(vpn_cfg) = &self.vpn {
+            sections.push(("vpn", vpn_cfg.to_keyfile()?));
+            if let Some(s) = vpn_cfg.secrets_to_keyfile() {
+                sections.push(("vpn-secrets", s));
+            }
         }
 
         keyfile_sections_to_string(&sections)

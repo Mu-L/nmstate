@@ -17,6 +17,7 @@ use super::{
 };
 
 pub(crate) const PROPERTY_SPLITTER: &str = ".";
+const SORT_CAPTURE_MAX_ROUND: usize = 10;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -70,8 +71,10 @@ impl NetworkCaptureRules {
         &self,
         current: &NetworkState,
     ) -> Result<HashMap<String, NetworkState>, NmstateError> {
+        let mut cmds = self.cmds.clone();
+        sort_captures(&mut cmds)?;
         let mut ret = HashMap::new();
-        for (var_name, cmd) in self.cmds.as_slice() {
+        for (var_name, cmd) in cmds.as_slice() {
             let matched_state = cmd.execute(current, &ret)?;
             log::debug!(
                 "Found match state for {}: {:?}",
@@ -98,9 +101,16 @@ pub struct NetworkCaptureCommand {
     pub(crate) value_capture: Option<String>,
     pub(crate) value_capture_pos: usize,
     pub(crate) line: String,
+    pub(crate) capture_priority: usize,
 }
 
 impl NetworkCaptureCommand {
+    pub(crate) fn parent_capture(&self) -> Option<&str> {
+        self.key_capture
+            .as_deref()
+            .or(self.value_capture.as_deref())
+    }
+
     pub(crate) fn parse(line: &str) -> Result<Self, NmstateError> {
         let line = line
             .trim()
@@ -192,15 +202,30 @@ impl NetworkCaptureCommand {
                     )
                 });
             } else {
-                return Ok(NetworkState::new());
+                // User just want to store full state to a new name
+                return Ok(input);
             }
         }
 
-        let matching_value = value_to_string(&get_value(
-            &self.value,
-            &input,
-            self.line.as_str(),
-        )?);
+        let value_input = if let Some(cap_name) = self.value_capture.as_ref() {
+            if let Some(cap) = captures.get(cap_name) {
+                cap.clone()
+            } else {
+                return Err(NmstateError::new_policy_error(
+                    format!("Capture {cap_name} not found"),
+                    self.line.as_str(),
+                    self.key_capture_pos,
+                ));
+            }
+        } else {
+            current.clone()
+        };
+        let matching_value =
+            match get_value(&self.value, &value_input, self.line.as_str())? {
+                serde_json::Value::Null => None,
+                v => Some(value_to_string(&v)),
+            };
+        let matching_value_str = matching_value.clone().unwrap_or_default();
 
         let mut ret = NetworkState::new();
 
@@ -217,19 +242,19 @@ impl NetworkCaptureCommand {
                 ));
             };
 
-        match keys.get(0).map(String::as_str) {
+        match keys.first().map(String::as_str) {
             Some("routes") => {
                 ret.routes = match self.action {
                     NetworkCaptureAction::Equal => get_route_match(
                         &keys[1..],
-                        matching_value.as_str(),
+                        matching_value_str.as_str(),
                         &input,
                         self.line.as_str(),
                         key_pos + "routes.".len(),
                     )?,
                     NetworkCaptureAction::Replace => update_routes(
                         &keys[1..],
-                        matching_value.as_str(),
+                        matching_value.as_deref(),
                         &input,
                         self.line.as_str(),
                         key_pos + "routes.".len(),
@@ -241,14 +266,14 @@ impl NetworkCaptureCommand {
                 ret.rules = match self.action {
                     NetworkCaptureAction::Equal => get_route_rule_match(
                         &keys[1..],
-                        matching_value.as_str(),
+                        matching_value_str.as_str(),
                         &input,
                         self.line.as_str(),
                         key_pos + "route-rules.".len(),
                     )?,
                     NetworkCaptureAction::Replace => update_route_rules(
                         &keys[1..],
-                        matching_value.as_str(),
+                        matching_value.as_deref(),
                         &input,
                         self.line.as_str(),
                         key_pos + "route-rules.".len(),
@@ -260,14 +285,14 @@ impl NetworkCaptureCommand {
                 ret.interfaces = match self.action {
                     NetworkCaptureAction::Equal => get_iface_match(
                         &keys[1..],
-                        matching_value.as_str(),
+                        matching_value_str.as_str(),
                         &input,
                         self.line.as_str(),
                         key_pos + "interfaces.".len(),
                     )?,
                     NetworkCaptureAction::Replace => update_ifaces(
                         &keys[1..],
-                        matching_value.as_str(),
+                        matching_value.as_deref(),
                         &input,
                         self.line.as_str(),
                         key_pos + "interfaces.".len(),
@@ -354,6 +379,9 @@ pub(crate) fn get_value(
         NetworkCaptureToken::Value(v, _) => {
             Ok(serde_json::Value::String(v.clone()))
         }
+        NetworkCaptureToken::Null(_) => {
+            Ok(serde_json::Value::Null)
+        }
         _ => todo!(),
     }
 }
@@ -363,7 +391,7 @@ fn get_input_capture_source(
     line: &str,
     pipe_token: &NetworkCaptureToken,
 ) -> Result<String, NmstateError> {
-    match tokens.get(0) {
+    match tokens.first() {
         Some(NetworkCaptureToken::Path(path, pos)) => {
             if path.len() != 2 || path[0] != "capture" {
                 Err(NmstateError::new_policy_error(
@@ -409,8 +437,8 @@ fn get_condition_key(
     action_token: &NetworkCaptureToken,
 ) -> Result<(NetworkCaptureToken, Option<(String, usize)>), NmstateError> {
     if tokens.len() == 1 {
-        if let Some(NetworkCaptureToken::Path(path, pos)) = tokens.get(0) {
-            if path.get(0) == Some(&"capture".to_string()) {
+        if let Some(NetworkCaptureToken::Path(path, pos)) = tokens.first() {
+            if path.first() == Some(&"capture".to_string()) {
                 if path.len() <= 2 {
                     return Err(NmstateError::new_policy_error(
                         "No property path after capture name".to_string(),
@@ -469,7 +497,7 @@ fn get_condition_value(
 
     match tokens[0] {
         NetworkCaptureToken::Path(ref path, pos) => {
-            Ok(if path.get(0) == Some(&"capture".to_string()) {
+            Ok(if path.first() == Some(&"capture".to_string()) {
                 if path.len() < 3 {
                     return Err(NmstateError::new(
                         ErrorKind::InvalidArgument,
@@ -494,6 +522,7 @@ fn get_condition_value(
             })
         }
         NetworkCaptureToken::Value(_, _) => Ok((tokens[0].clone(), None)),
+        NetworkCaptureToken::Null(_) => Ok((tokens[0].clone(), None)),
         _ => Err(NmstateError::new(
             ErrorKind::InvalidArgument,
             format!(
@@ -566,10 +595,72 @@ fn process_tokens_without_pipe(
             ret.value_capture = Some(cap_name);
             ret.value_capture_pos = pos;
         }
-    } else if let Some(NetworkCaptureToken::Path(_, _)) = tokens.get(0) {
+    } else if let Some(NetworkCaptureToken::Path(_, _)) = tokens.first() {
         // User just want to remove all information except the defined one
         ret.action = NetworkCaptureAction::None;
         ret.key = tokens[0].clone()
     }
     Ok(())
+}
+
+fn sort_captures(
+    cmds: &mut [(String, NetworkCaptureCommand)],
+) -> Result<(), NmstateError> {
+    for _ in 0..SORT_CAPTURE_MAX_ROUND {
+        if set_capture_priority(cmds) {
+            cmds.sort_unstable_by_key(|(_, cmd)| cmd.capture_priority);
+            return Ok(());
+        }
+    }
+    Err(NmstateError::new(
+        ErrorKind::InvalidArgument,
+        format!(
+            "Failed to sort the policy capture in \
+                {SORT_CAPTURE_MAX_ROUND} round of rotation, \
+                please order the capture in desire \
+                policy by placing capture before its consumer"
+        ),
+    ))
+}
+
+// Return True if we have all capture_priority are set (not 0).
+// The capture_priority value should be its depend captures' + 1.
+// For independent capture, they are set to 1.
+fn set_capture_priority(cmds: &mut [(String, NetworkCaptureCommand)]) -> bool {
+    let mut ret = true;
+
+    // Vec<(index, (capture_name, capture_priority))>
+    let mut pending_changes: Vec<(usize, (String, usize))> = Vec::new();
+
+    for (index, (cap_name, cmd)) in cmds.iter().enumerate() {
+        let cur_capture_priorities: HashMap<String, usize> = cmds
+            .iter()
+            .filter_map(|(cap_name, cmd)| {
+                if cmd.capture_priority != 0 {
+                    Some((cap_name.to_string(), cmd.capture_priority))
+                } else {
+                    None
+                }
+            })
+            .chain(pending_changes.iter().map(|(_, (cap_name, priority))| {
+                (cap_name.to_string(), *priority)
+            }))
+            .collect();
+        if let Some(dep_name) = cmd.parent_capture() {
+            if let Some(parent_priority) = cur_capture_priorities.get(dep_name)
+            {
+                pending_changes
+                    .push((index, (cap_name.to_string(), parent_priority + 1)))
+            } else {
+                ret = false;
+            }
+        } else {
+            pending_changes.push((index, (cap_name.to_string(), 1)));
+        }
+    }
+
+    for (index, (_, capture_priority)) in pending_changes {
+        cmds[index].1.capture_priority = capture_priority;
+    }
+    ret
 }

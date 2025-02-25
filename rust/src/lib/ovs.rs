@@ -1,52 +1,83 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+use crate::{ErrorKind, NmstateError};
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
+#[serde(deny_unknown_fields)]
 pub struct OvsDbGlobalConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "show_as_ordered_map"
+    )]
     // When the value been set as None, specified key will be removed instead
     // of merging.
     // To remove all settings of external_ids or other_config, use empty
     // HashMap
     pub external_ids: Option<HashMap<String, Option<String>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "show_as_ordered_map"
+    )]
     pub other_config: Option<HashMap<String, Option<String>>>,
-    #[serde(skip)]
-    pub(crate) prop_list: Vec<&'static str>,
+}
+
+impl OvsDbGlobalConfig {
+    pub(crate) const OVN_BRIDGE_MAPPINGS_KEY: &'static str =
+        "ovn-bridge-mappings";
+
+    // User want to remove all settings except OVN.
+    pub(crate) fn is_purge(&self) -> bool {
+        match (self.external_ids.as_ref(), self.other_config.as_ref()) {
+            (None, None) => true,
+            (Some(eids), Some(oids)) => eids.is_empty() && oids.is_empty(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn sanitize(&self) -> Result<(), NmstateError> {
+        if self
+            .external_ids
+            .as_ref()
+            .map(|e| e.contains_key(Self::OVN_BRIDGE_MAPPINGS_KEY))
+            == Some(true)
+        {
+            Err(NmstateError::new(
+                ErrorKind::InvalidArgument,
+                format!(
+                    "The `{}` is reserved for OVN mapping, please use \
+                    `ovn` section instead of `ovs-db` section",
+                    Self::OVN_BRIDGE_MAPPINGS_KEY
+                ),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn show_as_ordered_map<S>(
+    v: &Option<HashMap<String, Option<String>>>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if let Some(v) = v {
+        let ordered: BTreeMap<_, _> = v.iter().collect();
+        ordered.serialize(s)
+    } else {
+        s.serialize_none()
+    }
 }
 
 impl OvsDbGlobalConfig {
     pub fn is_none(&self) -> bool {
         self.external_ids.is_none() && self.other_config.is_none()
-    }
-}
-
-impl<'de> Deserialize<'de> for OvsDbGlobalConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let mut ret = Self::default();
-        let v = serde_json::Value::deserialize(deserializer)?;
-        if let Some(v) = v.as_object() {
-            if let Some(v) = v.get("external_ids") {
-                ret.prop_list.push("external_ids");
-                ret.external_ids = Some(value_to_hash_map(v));
-            }
-            if let Some(v) = v.get("other_config") {
-                ret.prop_list.push("other_config");
-                ret.other_config = Some(value_to_hash_map(v));
-            }
-        } else {
-            return Err(serde::de::Error::custom(format!(
-                "Expecting dict/HashMap, but got {v:?}"
-            )));
-        }
-        Ok(ret)
     }
 }
 
@@ -65,12 +96,6 @@ pub struct OvsDbIfaceConfig {
 }
 
 impl OvsDbIfaceConfig {
-    pub(crate) fn empty() -> Self {
-        Self {
-            external_ids: Some(HashMap::new()),
-            other_config: Some(HashMap::new()),
-        }
-    }
     pub(crate) fn get_external_ids(&self) -> HashMap<&str, &str> {
         let mut ret = HashMap::new();
         if let Some(eids) = self.external_ids.as_ref() {
@@ -102,13 +127,21 @@ impl<'de> Deserialize<'de> for OvsDbIfaceConfig {
         D: Deserializer<'de>,
     {
         let mut ret = Self::default();
-        let v = serde_json::Value::deserialize(deserializer)?;
-        if let Some(v) = v.as_object() {
-            if let Some(v) = v.get("external_ids") {
-                ret.external_ids = Some(value_to_hash_map(v));
+        let mut v = serde_json::Value::deserialize(deserializer)?;
+        if let Some(v) = v.as_object_mut() {
+            if let Some(v) = v.remove("external_ids") {
+                ret.external_ids = Some(value_to_hash_map(&v));
             }
-            if let Some(v) = v.get("other_config") {
-                ret.other_config = Some(value_to_hash_map(v));
+            if let Some(v) = v.remove("other_config") {
+                ret.other_config = Some(value_to_hash_map(&v));
+            }
+            if !v.is_empty() {
+                let remain_keys: Vec<String> = v.keys().cloned().collect();
+                return Err(serde::de::Error::custom(format!(
+                    "Unsupported section names '{}', only supports \
+                    `external_ids` and `other_config`",
+                    remain_keys.join(", ")
+                )));
             }
         } else {
             return Err(serde::de::Error::custom(format!(
@@ -150,69 +183,20 @@ fn value_to_hash_map(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct MergedOvsDbGlobalConfig {
-    pub(crate) desired: OvsDbGlobalConfig,
+    pub(crate) desired: Option<OvsDbGlobalConfig>,
     pub(crate) current: OvsDbGlobalConfig,
-    pub(crate) external_ids: HashMap<String, Option<String>>,
-    pub(crate) other_config: HashMap<String, Option<String>>,
 }
 
 impl MergedOvsDbGlobalConfig {
-    // Partial editing for ovsdb:
-    //  * Merge desire with current and do overriding.
-    //  * Use `ovsdb: {}` to remove all settings.
-    //  * To remove a key from existing, use `foo: None`.
     pub(crate) fn new(
-        desired: OvsDbGlobalConfig,
+        mut desired: Option<OvsDbGlobalConfig>,
         current: OvsDbGlobalConfig,
-    ) -> Self {
-        if desired.prop_list.is_empty() {
-            // User want to remove all settings
-            Self {
-                desired,
-                current,
-                external_ids: HashMap::new(),
-                other_config: HashMap::new(),
-            }
-        } else {
-            let mut external_ids =
-                current.external_ids.as_ref().cloned().unwrap_or_default();
-            let mut other_config =
-                current.other_config.as_ref().cloned().unwrap_or_default();
-
-            if let Some(ex_ids) = desired.external_ids.as_ref() {
-                if ex_ids.is_empty() {
-                    external_ids.clear();
-                } else {
-                    for (k, v) in ex_ids {
-                        if v.is_none() {
-                            external_ids.remove(k);
-                        } else {
-                            external_ids.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-            }
-
-            if let Some(cfgs) = desired.other_config.as_ref() {
-                if cfgs.is_empty() {
-                    other_config.clear();
-                } else {
-                    for (k, v) in cfgs {
-                        if v.is_none() {
-                            other_config.remove(k);
-                        } else {
-                            other_config.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-            }
-
-            Self {
-                desired,
-                current,
-                external_ids,
-                other_config,
+    ) -> Result<Self, NmstateError> {
+        if let Some(desired) = desired.as_mut() {
+            if !desired.is_purge() {
+                desired.sanitize()?;
             }
         }
+        Ok(Self { desired, current })
     }
 }

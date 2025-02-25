@@ -1,21 +1,4 @@
-#
-# Copyright (c) 2018-2019 Red Hat, Inc.
-#
-# This file is part of nmstate
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 2.1 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -26,6 +9,7 @@ from operator import itemgetter
 
 import libnmstate
 from libnmstate.schema import Bond
+from libnmstate.schema import Description
 from libnmstate.schema import Interface
 from libnmstate.schema import InterfaceIP
 from libnmstate.schema import InterfaceIPv4
@@ -117,7 +101,7 @@ class State:
         self._sort_iface_bridge_ports()
         self._ipv4_skeleton_canonicalization()
         self._ipv6_skeleton_canonicalization()
-        self._ignore_dhcp_manual_addr()
+        self._ignore_addr_with_lifetime()
         self._ignore_dhcp_option_when_off()
         self._ignore_ipv6_link_local()
         self._sort_ip_addresses()
@@ -128,6 +112,7 @@ class State:
         self._sort_ovs_lag_ports()
         self._sort_mptcp_flags()
         self._remove_mptcp_flags_of_ip_addr()
+        self._remove_top_descriptions()
 
     def match(self, other):
         return state_match(self.state, other.state)
@@ -204,11 +189,16 @@ class State:
                     key=itemgetter(InterfaceIP.ADDRESS_IP)
                 )
 
-    def _ignore_dhcp_manual_addr(self):
+    def _ignore_addr_with_lifetime(self):
         for iface_state in self._state.get(Interface.KEY, []):
             for family in (Interface.IPV4, Interface.IPV6):
-                if iface_state.get(family, {}).get(InterfaceIP.DHCP):
-                    iface_state[family][InterfaceIP.ADDRESS] = []
+                new_addrs = []
+                for addr in iface_state[family][InterfaceIP.ADDRESS]:
+                    if addr.get(
+                        InterfaceIP.ADDRESS_VALID_LEFT,
+                    ) in (None, InterfaceIP.ADDRESS_LIFETIME_FOREVER):
+                        new_addrs.append(addr)
+                iface_state[family][InterfaceIP.ADDRESS] = new_addrs
 
     def _ignore_dhcp_option_when_off(self):
         for iface_state in self._state.get(Interface.KEY, []):
@@ -305,6 +295,9 @@ class State:
                 InterfaceIPv6.ADDRESS, []
             ):
                 addr.pop(InterfaceIPv6.MPTCP_FLAGS, None)
+
+    def _remove_top_descriptions(self):
+        self._state.pop(Description.KEY, None)
 
 
 def _lookup_iface_state_by_name(interfaces_state, ifname):

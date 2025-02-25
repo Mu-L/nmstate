@@ -1,4 +1,4 @@
-use std::convert::TryFrom;
+// SPDX-License-Identifier: Apache-2.0
 
 use log::warn;
 
@@ -54,16 +54,21 @@ pub(crate) fn append_bridge_port_config(
                 .and_then(|br_info| br_info.vlan_filtering)
                 == Some(true)
             {
-                port_conf.vlan = np_port_info
-                    .vlans
-                    .as_ref()
-                    .and_then(|v| parse_port_vlan_conf(v.as_slice()));
+                port_conf.vlan = np_port_info.vlans.as_ref().and_then(|v| {
+                    parse_port_vlan_conf(
+                        v.as_slice(),
+                        np_iface
+                            .bridge
+                            .as_ref()
+                            .and_then(|br_info| br_info.default_pvid),
+                    )
+                });
             }
         }
         port_confs.push(port_conf);
     }
 
-    if let Some(mut br_conf) = br_iface.bridge.as_mut() {
+    if let Some(br_conf) = br_iface.bridge.as_mut() {
         br_conf.port = Some(port_confs);
     }
 }
@@ -134,6 +139,7 @@ fn np_bridge_options_to_nmstate(
                     None
                 }
             });
+        options.vlan_default_pvid = np_bridge.default_pvid;
     }
     Ok(options)
 }

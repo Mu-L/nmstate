@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(test)]
 mod base;
 #[cfg(test)]
@@ -5,11 +7,19 @@ mod bond;
 #[cfg(test)]
 mod bridge;
 #[cfg(test)]
+mod debug_trait;
+#[cfg(test)]
 mod dns;
 #[cfg(test)]
 mod ethernet;
 #[cfg(test)]
 mod ethtool;
+#[cfg(test)]
+mod gen_diff;
+#[cfg(test)]
+mod gen_revert;
+#[cfg(test)]
+mod identifier;
 #[cfg(test)]
 mod ifaces;
 #[cfg(test)]
@@ -18,6 +28,8 @@ mod ifaces_ctrller;
 mod infiniband;
 #[cfg(test)]
 mod ip;
+#[cfg(test)]
+mod ipsec;
 #[cfg(test)]
 mod lldp;
 #[cfg(test)]
@@ -31,6 +43,8 @@ mod net_state;
 #[cfg(test)]
 mod nm;
 #[cfg(test)]
+mod ovn;
+#[cfg(test)]
 mod ovs;
 #[cfg(test)]
 mod ovsdb;
@@ -42,6 +56,8 @@ mod route;
 mod route_rule;
 #[cfg(test)]
 mod sriov;
+#[cfg(test)]
+mod statistic;
 #[cfg(test)]
 mod testlib;
 #[cfg(test)]

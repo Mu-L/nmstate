@@ -92,7 +92,7 @@ impl EthernetInterface {
         if let Some(sriov_conf) =
             self.ethernet.as_mut().and_then(|e| e.sr_iov.as_mut())
         {
-            sriov_conf.sanitize();
+            sriov_conf.sanitize()?
         }
 
         Ok(())
@@ -166,17 +166,6 @@ pub struct VethConfig {
 }
 
 impl MergedInterfaces {
-    pub(crate) fn has_sriov_vf_changes(&self) -> bool {
-        self.kernel_ifaces.values().any(|i| {
-            if let Some(Interface::Ethernet(eth_iface)) = i.for_apply.as_ref() {
-                eth_iface.ethernet.as_ref().map(|e| e.sr_iov.is_some())
-                    == Some(true)
-            } else {
-                false
-            }
-        })
-    }
-
     // Raise error if new veth interface has no peer defined.
     // Mark old veth peer as absent when veth changed its peer.
     // Mark veth peer as absent also when veth is marked as absent.
@@ -205,7 +194,6 @@ impl MergedInterfaces {
                 if eth_iface.veth.is_none()
                     && !self.gen_conf_mode
                     && !veth_peers.contains(&eth_iface.base.name.as_str())
-                    && !self.has_sriov_vf_changes()
                 {
                     return Err(NmstateError::new(
                         ErrorKind::InvalidArgument,
@@ -350,7 +338,7 @@ impl Interfaces {
         for iface in self.kernel_ifaces.values().filter(|i| {
             i.is_up()
                 && i.iface_type() == InterfaceType::Veth
-                && current.kernel_ifaces.get(i.name()).is_none()
+                && !current.kernel_ifaces.contains_key(i.name())
         }) {
             if let Interface::Ethernet(eth_iface) = iface {
                 if eth_iface.veth.is_none() {

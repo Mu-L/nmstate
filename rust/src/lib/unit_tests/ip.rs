@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    unit_tests::testlib::new_eth_iface, BaseInterface, ErrorKind, Interface,
-    InterfaceState, Interfaces, MergedInterfaces,
+    ip::sanitize_ip_network, unit_tests::testlib::new_eth_iface, BaseInterface,
+    ErrorKind, Interface, InterfaceState, Interfaces, MergedInterfaces,
 };
 
 fn gen_test_eth_ifaces() -> Interfaces {
@@ -241,7 +241,7 @@ ipv6:
     )
     .unwrap();
 
-    let result = iface.sanitize();
+    let result = iface.sanitize(true);
     assert!(result.is_err());
     if let Err(e) = result {
         assert_eq!(e.kind(), ErrorKind::InvalidArgument);
@@ -279,4 +279,290 @@ fn test_ipv6_verify_emtpy() {
             .unwrap();
 
     merged_ifaces.verify(&cur_ifaces).unwrap();
+}
+
+#[test]
+fn test_should_not_have_ipv6_in_ipv4_section() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r#"---
+            - name: eth1
+              type: ethernet
+              state: up
+              ipv4:
+                enabled: "true"
+                dhcp: "false"
+                address:
+                  - ip: "2001:db8:2::1"
+                    prefix-length: 64"#,
+    )
+    .unwrap();
+
+    let result =
+        MergedInterfaces::new(des_ifaces, gen_test_eth_ifaces(), false, false);
+    assert!(result.is_err());
+
+    if let Err(e) = result {
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+    }
+}
+
+#[test]
+fn test_should_not_have_ipv4_in_ipv6_section() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+            - name: eth1
+              type: ethernet
+              state: up
+              ipv6:
+                enabled: true
+                dhcp: false
+                address:
+                  - ip: 192.0.2.1
+                    prefix-length: 24",
+    )
+    .unwrap();
+
+    let result =
+        MergedInterfaces::new(des_ifaces, gen_test_eth_ifaces(), false, false);
+    assert!(result.is_err());
+
+    if let Err(e) = result {
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+    }
+}
+
+#[test]
+fn test_ipv4_verify_valid_prefix() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+            - name: eth1
+              type: ethernet
+              state: up
+              ipv4:
+                enabled: true
+                dhcp: false
+                address:
+                  - ip: 192.0.2.1
+                    prefix-length: 33",
+    )
+    .unwrap();
+
+    let result =
+        MergedInterfaces::new(des_ifaces, gen_test_eth_ifaces(), false, false);
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_ipv6_verify_valid_prefix() {
+    let des_ifaces: Interfaces = serde_yaml::from_str(
+        r#"---
+            - name: eth1
+              type: ethernet
+              state: up
+              ipv6:
+                enabled: true
+                dhcp: false
+                address:
+                  - ip: "2001:db8:2::1"
+                    prefix-length: 129"#,
+    )
+    .unwrap();
+
+    let result =
+        MergedInterfaces::new(des_ifaces, gen_test_eth_ifaces(), false, false);
+
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_sanitize_ip_network_empty_str() {
+    let result = sanitize_ip_network("");
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+    }
+}
+
+#[test]
+fn test_sanitize_ip_network_invalid_str() {
+    let result = sanitize_ip_network("192.0.2.1/24/");
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+    }
+}
+
+#[test]
+fn test_sanitize_ip_network_invalid_ipv4_prefix_length() {
+    let result = sanitize_ip_network("192.0.2.1/33");
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+    }
+}
+
+#[test]
+fn test_sanitize_ip_network_invalid_ipv6_prefix_length() {
+    let result = sanitize_ip_network("::1/129");
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+    }
+}
+
+#[test]
+fn test_sanitize_ip_network_ipv4_gateway() {
+    assert_eq!(sanitize_ip_network("0.0.0.1/0").unwrap(), "0.0.0.0/0");
+}
+
+#[test]
+fn test_sanitize_ip_network_ipv6_gateway() {
+    assert_eq!(sanitize_ip_network("::1/0").unwrap(), "::/0");
+}
+
+#[test]
+fn test_sanitize_ip_network_ipv4_host_only() {
+    assert_eq!(sanitize_ip_network("192.0.2.1").unwrap(), "192.0.2.1/32");
+}
+
+#[test]
+fn test_sanitize_ip_network_ipv6_host_only() {
+    assert_eq!(
+        sanitize_ip_network("2001:db8:1::0").unwrap(),
+        "2001:db8:1::/128"
+    );
+}
+
+#[test]
+fn test_sanitize_ip_network_ipv4_host_only_explicit() {
+    assert_eq!(sanitize_ip_network("192.0.2.1/32").unwrap(), "192.0.2.1/32");
+}
+
+#[test]
+fn test_sanitize_ip_network_ipv6_host_only_explicit() {
+    assert_eq!(
+        sanitize_ip_network("2001:db8:1::0/128").unwrap(),
+        "2001:db8:1::/128"
+    );
+}
+
+#[test]
+fn test_sanitize_ip_network_ipv4_net() {
+    assert_eq!(sanitize_ip_network("192.0.3.1/23").unwrap(), "192.0.2.0/23");
+}
+
+#[test]
+fn test_sanitize_ip_network_ipv6_net() {
+    assert_eq!(
+        sanitize_ip_network("2001:db8:1::f/64").unwrap(),
+        "2001:db8:1::/64"
+    );
+}
+
+#[test]
+fn test_auto_ip_lift_time() {
+    let left_fmt: BaseInterface = serde_yaml::from_str(
+        r#"---
+        name: eth1
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: "true"
+          dhcp: "false"
+          address:
+          - ip: "192.168.1.1"
+            prefix-length: "24"
+            valid-left: "60sec"
+            preferred-left: "60sec"
+        ipv6:
+          enabled: "true"
+          dhcp: "false"
+          address:
+          - ip: "2001:0db8:85a3:0000:0000:8a2e:0370:7331"
+            prefix-length: "64"
+            valid-left: "60sec"
+            preferred-left: "60sec"
+        "#,
+    )
+    .unwrap();
+    let life_time_fmt: BaseInterface = serde_yaml::from_str(
+        r#"---
+        name: eth1
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: "true"
+          dhcp: "false"
+          address:
+          - ip: "192.168.1.1"
+            prefix-length: "24"
+            valid-life-time: "60sec"
+            preferred-life-time: "60sec"
+        ipv6:
+          enabled: "true"
+          dhcp: "false"
+          address:
+          - ip: "2001:0db8:85a3:0000:0000:8a2e:0370:7331"
+            prefix-length: "64"
+            valid-life-time: "60sec"
+            preferred-life-time: "60sec"
+        "#,
+    )
+    .unwrap();
+
+    let iproute_fmt: BaseInterface = serde_yaml::from_str(
+        r#"---
+        name: eth1
+        type: ethernet
+        state: up
+        ipv4:
+          enabled: "true"
+          dhcp: "false"
+          address:
+          - ip: "192.168.1.1"
+            prefix-length: "24"
+            valid-lft: "60sec"
+            preferred-lft: "60sec"
+        ipv6:
+          enabled: "true"
+          dhcp: "false"
+          address:
+          - ip: "2001:0db8:85a3:0000:0000:8a2e:0370:7331"
+            prefix-length: "64"
+            valid-lft: "60sec"
+            preferred-lft: "60sec"
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(left_fmt, life_time_fmt);
+    assert_eq!(iproute_fmt, life_time_fmt);
+}
+
+#[test]
+fn test_ip_serlize_allow_extra_address() {
+    let desired: Interfaces = serde_yaml::from_str(
+        r#"---
+        - name: eth1
+          type: ethernet
+          state: up
+          ipv4:
+            enabled: "true"
+            dhcp: "false"
+            allow-extra-address: false
+          ipv6:
+            enabled: "true"
+            dhcp: "false"
+        "#,
+    )
+    .unwrap();
+
+    let new: Interfaces =
+        serde_yaml::from_str(&serde_yaml::to_string(&desired).unwrap())
+            .unwrap();
+
+    assert_eq!(desired, new);
 }

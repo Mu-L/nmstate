@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::super::{
     connection::DbusDictionary, ErrorKind, NmError, ToDbusValue,
@@ -9,7 +11,7 @@ use super::super::{
 
 const GLIB_FILE_PATH_PREFIX: &str = "file://";
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(try_from = "DbusDictionary")]
 #[non_exhaustive]
 pub struct NmSetting8021X {
@@ -19,6 +21,8 @@ pub struct NmSetting8021X {
     pub client_cert: Option<Vec<u8>>,
     pub ca_cert: Option<Vec<u8>>,
     pub private_key_password: Option<String>,
+    pub phase2_auth: Option<String>,
+    pub password: Option<String>,
     _other: HashMap<String, zvariant::OwnedValue>,
 }
 
@@ -32,6 +36,8 @@ impl TryFrom<DbusDictionary> for NmSetting8021X {
             client_cert: _from_map!(v, "client-cert", <Vec<u8>>::try_from)?,
             ca_cert: _from_map!(v, "ca-cert", <Vec<u8>>::try_from)?,
             private_key_password: None,
+            phase2_auth: _from_map!(v, "phase2-auth", String::try_from)?,
+            password: None,
             _other: v,
         })
     }
@@ -58,6 +64,12 @@ impl ToDbusValue for NmSetting8021X {
         if let Some(v) = &self.private_key_password {
             ret.insert("private-key-password", zvariant::Value::new(v));
         }
+        if let Some(v) = &self.phase2_auth {
+            ret.insert("phase2-auth", zvariant::Value::new(v));
+        }
+        if let Some(v) = &self.password {
+            ret.insert("password", zvariant::Value::new(v));
+        }
         ret.extend(self._other.iter().map(|(key, value)| {
             (key.as_str(), zvariant::Value::from(value.clone()))
         }));
@@ -75,7 +87,22 @@ impl NmSetting8021X {
                 }
                 Err(e) => {
                     log::warn!(
-                        "Filed to convert private_key_password: \
+                        "Failed to convert private_key_password: \
+                        {:?} {:?}",
+                        v,
+                        e
+                    );
+                }
+            }
+        }
+        if let Some(v) = secrets.get("password") {
+            match String::try_from(v.clone()) {
+                Ok(s) => {
+                    self.password = Some(s);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to convert password: \
                         {:?} {:?}",
                         v,
                         e

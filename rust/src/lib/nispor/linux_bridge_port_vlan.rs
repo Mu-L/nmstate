@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
-    BridgePortTunkTag, BridgePortVlanConfig, BridgePortVlanMode,
+    BridgePortTrunkTag, BridgePortVlanConfig, BridgePortVlanMode,
     BridgePortVlanRange,
 };
 
 pub(crate) fn parse_port_vlan_conf(
     np_vlan_entries: &[nispor::BridgeVlanEntry],
+    default_pvid: Option<u16>,
 ) -> Option<BridgePortVlanConfig> {
     let mut ret = BridgePortVlanConfig::new();
     let mut is_native = false;
@@ -12,8 +15,12 @@ pub(crate) fn parse_port_vlan_conf(
     let is_access_port = is_access_port(np_vlan_entries);
 
     for np_vlan_entry in np_vlan_entries {
+        let mut def_pvid = 1;
+        if let Some(pvid) = default_pvid {
+            def_pvid = pvid;
+        }
         let (vlan_min, vlan_max) = get_vlan_tag_range(np_vlan_entry);
-        if vlan_min == 1 && vlan_max == 1 {
+        if vlan_min == def_pvid && vlan_max == def_pvid {
             continue;
         }
         if is_access_port {
@@ -22,9 +29,9 @@ pub(crate) fn parse_port_vlan_conf(
             ret.tag = Some(vlan_max);
             is_native = true;
         } else if vlan_min == vlan_max {
-            trunk_tags.push(BridgePortTunkTag::Id(vlan_min));
+            trunk_tags.push(BridgePortTrunkTag::Id(vlan_min));
         } else {
-            trunk_tags.push(BridgePortTunkTag::IdRange(BridgePortVlanRange {
+            trunk_tags.push(BridgePortTrunkTag::IdRange(BridgePortVlanRange {
                 max: vlan_max,
                 min: vlan_min,
             }));

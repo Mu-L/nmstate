@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::iter::FromIterator;
 
 use crate::{
     BondMode, ErrorKind, Interface, InterfaceState, InterfaceType, Interfaces,
     MergedInterface, MergedInterfaces, NmstateError, OvsInterface,
 };
+
+use super::inter_ifaces::InterfaceNameSearch;
 
 fn is_port_overbook(
     port_to_ctrl: &mut HashMap<String, String>,
@@ -67,8 +68,12 @@ impl MergedInterfaces {
                     if !ctrl_iface.is_desired() {
                         continue;
                     }
-                    if let Some(ports) = ctrl_iface.merged.ports() {
-                        if !ports.contains(&des_ctrl_name.as_str()) {
+                    if let Some(ports) = ctrl_iface
+                        .desired
+                        .as_ref()
+                        .and_then(|desire| desire.ports())
+                    {
+                        if !ports.contains(&merged_iface.merged.name()) {
                             return Err(NmstateError::new(
                                 ErrorKind::InvalidArgument,
                                 format!(
@@ -154,10 +159,77 @@ impl MergedInterfaces {
         Ok(())
     }
 
+    // If port name reference should be check kernel name first, then fallback
+    // to profile name.
+    // Raise error when referring to a profile name has multiple interfaces.
+    pub(crate) fn resolve_port_name_ref(&mut self) -> Result<(), NmstateError> {
+        let iface_name_search = InterfaceNameSearch::new(self);
+
+        for iface in self.iter_mut() {
+            let des_iface = if let Some(d) = iface.desired.as_mut() {
+                d
+            } else {
+                continue;
+            };
+            if !des_iface.is_up() {
+                continue;
+            }
+            let ports: Vec<String> = if let Some(ports) = des_iface.ports() {
+                ports.iter().map(|p| p.to_string()).collect()
+            } else {
+                continue;
+            };
+            let for_apply = if let Some(i) = iface.for_apply.as_mut() {
+                i
+            } else {
+                continue;
+            };
+            let for_verify = if let Some(i) = iface.for_verify.as_mut() {
+                i
+            } else {
+                continue;
+            };
+            for port_name in ports {
+                let kernel_names = iface_name_search.get(&port_name);
+                // Prefer kernel name as port name
+                if kernel_names.contains(&port_name.as_str()) {
+                    continue;
+                }
+                if kernel_names.len() > 1 {
+                    return Err(NmstateError::new(
+                        ErrorKind::InvalidArgument,
+                        format!(
+                            "Controller {} ({}) has port with \
+                            profile name {} but multiple interfaces \
+                            are sharing the this profile name",
+                            des_iface.name(),
+                            des_iface.iface_type(),
+                            port_name,
+                        ),
+                    ));
+                } else if let Some(kernel_name) = kernel_names.first() {
+                    des_iface
+                        .change_port_name(&port_name, kernel_name.to_string());
+                    for_apply
+                        .change_port_name(&port_name, kernel_name.to_string());
+                    for_verify
+                        .change_port_name(&port_name, kernel_name.to_string());
+                } else {
+                    // This function is not responsible to validate whether
+                    // port interface exists or not. For example,
+                    // gen_diff() do not need to validate whether interface
+                    // exist or not.
+                    // Please do not raise error here.
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn handle_changed_ports(&mut self) -> Result<(), NmstateError> {
         let mut pending_changes: HashMap<
             String,
-            (String, Option<InterfaceType>),
+            (String, Option<InterfaceType>, InterfaceState),
         > = HashMap::new();
         for iface in self.iter() {
             if !iface.is_desired() || !iface.merged.is_controller() {
@@ -172,6 +244,7 @@ impl MergedInterfaces {
                         (
                             iface.merged.name().to_string(),
                             Some(iface.merged.iface_type()),
+                            iface.merged.base_iface().state,
                         ),
                     );
                 }
@@ -181,12 +254,20 @@ impl MergedInterfaces {
                     // port, we don't override it.
                     pending_changes
                         .entry(port_name.to_string())
-                        .or_insert_with(|| (String::new(), None));
+                        .or_insert_with(|| {
+                            (
+                                String::new(),
+                                None,
+                                iface.merged.base_iface().state,
+                            )
+                        });
                 }
             }
         }
 
-        for (iface_name, (ctrl_name, ctrl_type)) in pending_changes.drain() {
+        for (iface_name, (ctrl_name, ctrl_type, ctrl_state)) in
+            pending_changes.drain()
+        {
             if let Some(iface) = self.kernel_ifaces.get_mut(&iface_name) {
                 if !iface.is_changed() {
                     self.insert_order.push((
@@ -194,7 +275,7 @@ impl MergedInterfaces {
                         iface.merged.iface_type(),
                     ));
                 }
-                iface.apply_ctrller_change(ctrl_name, ctrl_type)?;
+                iface.apply_ctrller_change(ctrl_name, ctrl_type, ctrl_state)?;
             } else {
                 // OVS internal interface could be created by its controller OVS
                 // Bridge
@@ -206,12 +287,12 @@ impl MergedInterfaces {
                     self.kernel_ifaces.insert(
                         iface_name.to_string(),
                         MergedInterface::new(
-                            Some(Interface::OvsInterface(
+                            Some(Interface::OvsInterface(Box::new(
                                 OvsInterface::new_with_name_and_ctrl(
                                     &iface_name,
                                     &ctrl_name,
                                 ),
-                            )),
+                            ))),
                             None,
                         )?,
                     );
@@ -240,8 +321,10 @@ impl MergedInterfaces {
     pub(crate) fn resolve_port_iface_controller_type(
         &mut self,
     ) -> Result<(), NmstateError> {
-        let mut pending_changes: HashMap<String, (String, InterfaceType)> =
-            HashMap::new();
+        let mut pending_changes: HashMap<
+            String,
+            (String, InterfaceType, InterfaceState),
+        > = HashMap::new();
         // Port interface can only kernel interface
         for iface in self
             .kernel_ifaces
@@ -278,6 +361,7 @@ impl MergedInterfaces {
                             (
                                 ctrl_name.to_string(),
                                 ctrl_iface.merged.iface_type(),
+                                ctrl_iface.merged.base_iface().state,
                             ),
                         );
                     }
@@ -295,9 +379,15 @@ impl MergedInterfaces {
                 }
             }
         }
-        for (iface_name, (ctrl_name, ctrl_type)) in pending_changes.drain() {
+        for (iface_name, (ctrl_name, ctrl_type, ctrl_state)) in
+            pending_changes.drain()
+        {
             if let Some(iface) = self.kernel_ifaces.get_mut(&iface_name) {
-                iface.apply_ctrller_change(ctrl_name, Some(ctrl_type))?;
+                iface.apply_ctrller_change(
+                    ctrl_name,
+                    Some(ctrl_type),
+                    ctrl_state,
+                )?;
             }
         }
         Ok(())
@@ -522,6 +612,7 @@ impl Interfaces {
         for iface in self
             .kernel_ifaces
             .values()
+            .chain(self.user_ifaces.values())
             .filter(|i| i.is_controller() && i.is_up())
         {
             let cur_iface = current.get_iface(iface.name(), iface.iface_type());

@@ -9,8 +9,8 @@ use super::{
 use crate::nm::nm_dbus::{NmConnection, NmSettingIp, NmSettingIpMethod};
 use crate::{
     BaseInterface, Dhcpv4ClientId, Dhcpv6Duid, ErrorKind, Interface,
-    InterfaceIpv4, InterfaceIpv6, Ipv6AddrGenMode, NmstateError, RouteEntry,
-    WaitIp,
+    InterfaceIpAddr, InterfaceIpv4, InterfaceIpv6, Ipv6AddrGenMode,
+    NmstateError, RouteEntry, WaitIp,
 };
 
 const ADDR_GEN_MODE_EUI64: i32 = 0;
@@ -33,16 +33,25 @@ fn gen_nm_ipv4_setting(
         Some(i) => i,
     };
 
+    let nmstate_ip_addrs: Vec<InterfaceIpAddr> = iface_ip
+        .addresses
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|i| !i.is_auto())
+        .cloned()
+        .collect();
+
+    let mut nm_setting = nm_conn.ipv4.as_ref().cloned().unwrap_or_default();
     let mut addresses: Vec<String> = Vec::new();
     let method = if iface_ip.enabled {
+        let ipv4_routes = gen_nm_ip_routes(routes.unwrap_or_default(), false)?;
         if iface_ip.dhcp == Some(true) {
             NmSettingIpMethod::Auto
-        } else if !iface_ip.addresses.as_deref().unwrap_or_default().is_empty()
+        } else if !nmstate_ip_addrs.is_empty()
+            || !ipv4_routes.is_empty()
+            || !nm_setting.routes.is_empty()
         {
-            for ip_addr in iface_ip.addresses.as_deref().unwrap_or_default() {
-                addresses
-                    .push(format!("{}/{}", ip_addr.ip, ip_addr.prefix_length));
-            }
             NmSettingIpMethod::Manual
         } else {
             NmSettingIpMethod::Disabled
@@ -50,11 +59,12 @@ fn gen_nm_ipv4_setting(
     } else {
         NmSettingIpMethod::Disabled
     };
-    let mut nm_setting = nm_conn.ipv4.as_ref().cloned().unwrap_or_default();
+    for ip_addr in nmstate_ip_addrs {
+        addresses.push(format!("{}/{}", ip_addr.ip, ip_addr.prefix_length));
+    }
     nm_setting.method = Some(method);
     nm_setting.addresses = addresses;
     if iface_ip.is_auto() {
-        nm_setting.gateway = None;
         nm_setting.dhcp_timeout = Some(i32::MAX);
         nm_setting.route_metric = iface_ip.auto_route_metric.map(|i| i.into());
         nm_setting.dhcp_client_id = Some(nmstate_dhcp_client_id_to_nm(
@@ -71,21 +81,40 @@ fn gen_nm_ipv4_setting(
             iface_ip.auto_routes,
             iface_ip.auto_table_id,
         );
-        // No use case indicate we should support static routes with DHCP
-        // enabled.
+        // Clean old routes
+        nm_setting.gateway = None;
         nm_setting.routes = Vec::new();
-    }
-    if !iface_ip.is_auto() {
-        if let Some(routes) = routes {
-            nm_setting.routes = gen_nm_ip_routes(routes, false)?;
-            // We use above routes property for gateway also, in order
-            // to support multiple gateways.
-            nm_setting.gateway = None;
+        if Some(false) == iface_ip.dhcp_send_hostname {
+            nm_setting.dhcp_send_hostname = Some(false);
+        } else {
+            nm_setting.dhcp_send_hostname = Some(true);
+            if let Some(v) = iface_ip.dhcp_custom_hostname.as_deref() {
+                if v.is_empty() {
+                    nm_setting.dhcp_fqdn = None;
+                    nm_setting.dhcp_hostname = None;
+                } else {
+                    // We are not verifying full spec of FQDN, just check
+                    // whether it has do it not.
+                    if v.contains('.') {
+                        nm_setting.dhcp_fqdn = Some(v.to_string());
+                        nm_setting.dhcp_hostname = None;
+                    } else {
+                        nm_setting.dhcp_hostname = Some(v.to_string());
+                        nm_setting.dhcp_fqdn = None;
+                    }
+                }
+            }
         }
     }
-    if !iface_ip.enabled {
+    if iface_ip.enabled {
+        if let Some(routes) = routes {
+            nm_setting.routes = gen_nm_ip_routes(routes, false)?;
+            nm_setting.gateway = None;
+        }
+    } else {
         // Clean up static routes if ip is disabled
         nm_setting.routes = Vec::new();
+        nm_setting.gateway = None;
     }
     if let Some(rules) = iface_ip.rules.as_ref() {
         nm_setting.route_rules = gen_nm_ip_rules(rules, false)?;
@@ -113,6 +142,15 @@ fn gen_nm_ipv6_setting(
         }
         Some(i) => i,
     };
+    let nmstate_ip_addrs: Vec<InterfaceIpAddr> = iface_ip
+        .addresses
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|i| !i.is_auto())
+        .cloned()
+        .collect();
+    let mut nm_setting = nm_conn.ipv6.as_ref().cloned().unwrap_or_default();
     let mut addresses: Vec<String> = Vec::new();
     let method = if iface_ip.enabled {
         match (
@@ -128,16 +166,12 @@ fn gen_nm_ipv6_setting(
                 ))
             }
             (false, false) => {
-                if !iface_ip.addresses.as_deref().unwrap_or_default().is_empty()
+                let ipv6_routes =
+                    gen_nm_ip_routes(routes.unwrap_or_default(), true)?;
+                if !nmstate_ip_addrs.is_empty()
+                    || !ipv6_routes.is_empty()
+                    || !nm_setting.routes.is_empty()
                 {
-                    for ip_addr in
-                        iface_ip.addresses.as_deref().unwrap_or_default()
-                    {
-                        addresses.push(format!(
-                            "{}/{}",
-                            ip_addr.ip, ip_addr.prefix_length
-                        ));
-                    }
                     NmSettingIpMethod::Manual
                 } else {
                     NmSettingIpMethod::LinkLocal
@@ -147,13 +181,14 @@ fn gen_nm_ipv6_setting(
     } else {
         NmSettingIpMethod::Disabled
     };
-    let mut nm_setting = nm_conn.ipv6.as_ref().cloned().unwrap_or_default();
+    for ip_addr in nmstate_ip_addrs {
+        addresses.push(format!("{}/{}", ip_addr.ip, ip_addr.prefix_length));
+    }
     nm_setting.method = Some(method);
     nm_setting.addresses = addresses;
     nm_setting.addr_gen_mode =
         Some(nmstate_addr_gen_mode_to_nm(iface_ip.addr_gen_mode.as_ref()));
     if iface_ip.is_auto() {
-        nm_setting.gateway = None;
         nm_setting.dhcp_timeout = Some(i32::MAX);
         nm_setting.ra_timeout = Some(i32::MAX);
         nm_setting.dhcp_duid = Some(
@@ -179,15 +214,33 @@ fn gen_nm_ipv6_setting(
             iface_ip.auto_routes,
             iface_ip.auto_table_id,
         );
-        // No use case indicate we should support static routes with DHCP
-        // enabled.
+        // Clean old routes
+        nm_setting.gateway = None;
         nm_setting.routes = Vec::new();
+        if Some(false) == iface_ip.dhcp_send_hostname {
+            nm_setting.dhcp_send_hostname = Some(false);
+        } else {
+            nm_setting.dhcp_send_hostname = Some(true);
+            if let Some(v) = iface_ip.dhcp_custom_hostname.as_deref() {
+                if v.is_empty() {
+                    nm_setting.dhcp_hostname = None;
+                } else {
+                    nm_setting.dhcp_hostname = Some(v.to_string());
+                }
+            }
+        }
+    } else {
+        nm_setting.token = None;
     }
-    if !iface_ip.is_auto() {
+    if iface_ip.enabled {
         if let Some(routes) = routes {
             nm_setting.routes = gen_nm_ip_routes(routes, true)?;
+            nm_setting.gateway = None;
         }
-        nm_setting.token = None;
+    } else {
+        // Clean up static routes if ip is disabled
+        nm_setting.routes = Vec::new();
+        nm_setting.gateway = None;
     }
     if let Some(rules) = iface_ip.rules.as_ref() {
         nm_setting.route_rules = gen_nm_ip_rules(rules, true)?;
@@ -297,5 +350,19 @@ fn apply_nmstate_wait_ip(
             }
         }
         None => (),
+    }
+}
+
+// Even user not desired IP section changes, we should set ipv4.dhcp_timeout
+// and ipv6.dhcp_timeout to i32::MAX to make sure NetworkManager never
+// deactivate a desired interface
+pub(crate) fn fix_ip_dhcp_timeout(nm_conns: &mut [NmConnection]) {
+    for nm_conn in nm_conns {
+        if let Some(nm_ip_set) = nm_conn.ipv4.as_mut() {
+            nm_ip_set.dhcp_timeout = Some(i32::MAX);
+        }
+        if let Some(nm_ip_set) = nm_conn.ipv6.as_mut() {
+            nm_ip_set.dhcp_timeout = Some(i32::MAX);
+        }
     }
 }

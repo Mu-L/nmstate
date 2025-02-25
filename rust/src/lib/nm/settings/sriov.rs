@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::nm::nm_dbus::{
     NmConnection, NmSettingSriovVf, NmSettingSriovVfVlan,
 };
@@ -25,6 +27,10 @@ pub(crate) fn gen_nm_sriov_setting(
 
     if let Some(v) = sriov_conf.total_vfs {
         nm_sriov_set.total_vfs = Some(v);
+    }
+
+    if let Some(autoprobe) = sriov_conf.drivers_autoprobe {
+        nm_sriov_set.autoprobe_drivers = Some(autoprobe);
     }
 
     if let Some(vfs) = &sriov_conf.vfs {
@@ -69,6 +75,7 @@ fn gen_nm_vfs(
             let mut nm_vf_vlan = NmSettingSriovVfVlan::default();
             nm_vf_vlan.id = v;
             nm_vf_vlan.qos = vf.qos.unwrap_or_default();
+            nm_vf_vlan.protocol = vf.vlan_proto.unwrap_or_default().into();
             nm_vf.vlans = Some(vec![nm_vf_vlan]);
         }
         ret.push(nm_vf);

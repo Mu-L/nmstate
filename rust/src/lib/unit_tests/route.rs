@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    query_apply::is_route_delayed_by_nm,
     unit_tests::testlib::{
         gen_merged_ifaces_for_route_test, gen_route_entry,
         gen_test_route_entries, gen_test_routes_conf, TEST_IPV4_ADDR1,
         TEST_IPV4_NET1, TEST_IPV6_ADDR1, TEST_IPV6_ADDR2, TEST_IPV6_NET1,
         TEST_IPV6_NET2, TEST_NIC, TEST_ROUTE_METRIC,
     },
-    ErrorKind, InterfaceType, MergedRoutes, RouteEntry, RouteState, Routes,
+    ErrorKind, InterfaceType, Interfaces, MergedRoutes, RouteEntry, RouteState,
+    Routes,
 };
 
 #[test]
@@ -35,12 +37,14 @@ fn test_sort_uniqe_routes() {
         config: Some(test_routes.clone()),
     };
 
-    let merged_ifaces = gen_merged_ifaces_for_route_test();
+    let (merged_ifaces, current_ifaces) = gen_merged_ifaces_for_route_test();
 
     let merged_routes =
         MergedRoutes::new(des_routes, Routes::new(), &merged_ifaces).unwrap();
 
-    merged_routes.verify(&cur_routes, &[]).unwrap();
+    merged_routes
+        .verify(&cur_routes, &[], &current_ifaces)
+        .unwrap();
 
     test_routes.sort_unstable();
     test_routes.dedup();
@@ -57,12 +61,12 @@ fn test_verify_desire_route_not_found() {
     cur_route_entries.pop();
     cur_routes.config = Some(cur_route_entries);
 
-    let merged_ifaces = gen_merged_ifaces_for_route_test();
+    let (merged_ifaces, current_ifaces) = gen_merged_ifaces_for_route_test();
 
     let merged_routes =
         MergedRoutes::new(des_routes, Routes::new(), &merged_ifaces).unwrap();
 
-    let result = merged_routes.verify(&cur_routes, &[]);
+    let result = merged_routes.verify(&cur_routes, &[], &current_ifaces);
     assert!(result.is_err());
     assert_eq!(result.err().unwrap().kind(), ErrorKind::VerificationError);
 }
@@ -79,13 +83,13 @@ fn test_verify_absent_route_still_found() {
     absent_route_entries.push(absent_route);
     absent_routes.config = Some(absent_route_entries);
 
-    let merged_ifaces = gen_merged_ifaces_for_route_test();
+    let (merged_ifaces, current_ifaces) = gen_merged_ifaces_for_route_test();
 
     let merged_routes =
         MergedRoutes::new(absent_routes, Routes::new(), &merged_ifaces)
             .unwrap();
 
-    let result = merged_routes.verify(&cur_routes, &[]);
+    let result = merged_routes.verify(&cur_routes, &[], &current_ifaces);
     assert!(result.is_err());
     assert_eq!(result.err().unwrap().kind(), ErrorKind::VerificationError);
 }
@@ -103,17 +107,19 @@ fn test_verify_current_has_more_routes() {
 
     let des_routes = gen_test_routes_conf();
 
-    let merged_ifaces = gen_merged_ifaces_for_route_test();
+    let (merged_ifaces, current_ifaces) = gen_merged_ifaces_for_route_test();
 
     let merged_routes =
         MergedRoutes::new(des_routes, Routes::new(), &merged_ifaces).unwrap();
-    merged_routes.verify(&cur_routes, &[]).unwrap();
+    merged_routes
+        .verify(&cur_routes, &[], &current_ifaces)
+        .unwrap();
 }
 
 #[test]
 fn test_route_ignore_iface() {
     let routes: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0/0
   next-hop-address: 192.0.2.1
@@ -127,11 +133,11 @@ config:
 - destination: ::/0
   next-hop-address: 2001:db8:1::2
   next-hop-interface: eth2
-"#,
+",
     )
     .unwrap();
 
-    let merged_ifaces = gen_merged_ifaces_for_route_test();
+    let (merged_ifaces, _) = gen_merged_ifaces_for_route_test();
 
     let mut merged_routes =
         MergedRoutes::new(routes, Routes::new(), &merged_ifaces).unwrap();
@@ -140,7 +146,7 @@ config:
 
     merged_routes.remove_routes_to_ignored_ifaces(ignored_ifaces.as_slice());
 
-    let config_routes = merged_routes.indexed.get(&"eth2".to_string()).unwrap();
+    let config_routes = merged_routes.merged.get("eth2").unwrap();
 
     assert_eq!(merged_routes.route_changed_ifaces, vec!["eth2".to_string()]);
     assert_eq!(config_routes.len(), 2);
@@ -151,17 +157,17 @@ config:
 #[test]
 fn test_route_verify_ignore_iface() {
     let desire: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0/0
   state: absent
 - destination: ::/0
   state: absent
-"#,
+",
     )
     .unwrap();
     let current: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0/0
   next-hop-address: 192.0.2.1
@@ -169,11 +175,11 @@ config:
 - destination: ::/0
   next-hop-address: 2001:db8:1::2
   next-hop-interface: eth1
-"#,
+",
     )
     .unwrap();
 
-    let merged_ifaces = gen_merged_ifaces_for_route_test();
+    let (merged_ifaces, current_ifaces) = gen_merged_ifaces_for_route_test();
 
     let mut merged_routes =
         MergedRoutes::new(desire, Routes::new(), &merged_ifaces).unwrap();
@@ -182,7 +188,9 @@ config:
 
     merged_routes.remove_routes_to_ignored_ifaces(ignored_ifaces.as_slice());
 
-    merged_routes.verify(&current, &["eth1"]).unwrap();
+    merged_routes
+        .verify(&current, &["eth1"], &current_ifaces)
+        .unwrap();
 }
 
 #[test]
@@ -252,12 +260,17 @@ fn test_route_sanitize_ipv6_host_not_compact() {
         r#"
 destination: "2001:db8:1:0000:000::1"
 next-hop-address: "2001:db8:a:0000:000::1"
+source: "2001:0db8:85a3:0000:0000:8a2e:0370:7001"
 "#,
     )
     .unwrap();
     route.sanitize().unwrap();
     assert_eq!(route.destination, Some("2001:db8:1::1/128".to_string()));
     assert_eq!(route.next_hop_addr, Some("2001:db8:a::1".to_string()));
+    assert_eq!(
+        route.source,
+        Some("2001:db8:85a3::8a2e:370:7001".to_string())
+    );
 }
 
 #[test]
@@ -281,14 +294,14 @@ fn test_route_not_allowing_empty_dst() {
 #[test]
 fn test_route_sanitize_ipv6_ecmp() {
     let mut route: RouteEntry = serde_yaml::from_str(
-        r#"
+        r"
         destination: 2001:db:1::/64
         metric: 150
         next-hop-address: 2001:db8::2
         next-hop-interface: eth1
         weight: 2
         table-id: 254
-        "#,
+        ",
     )
     .unwrap();
     let result = route.sanitize();
@@ -299,7 +312,7 @@ fn test_route_sanitize_ipv6_ecmp() {
 #[test]
 fn test_route_ipv4_ecmp_is_match() {
     let absent_route: RouteEntry = serde_yaml::from_str(
-        r#"
+        r"
         destination: 192.0.2.1
         metric: 150
         next-hop-address: 2001:db8::2
@@ -307,18 +320,18 @@ fn test_route_ipv4_ecmp_is_match() {
         weight: 2
         table-id: 254
         state: absent
-        "#,
+        ",
     )
     .unwrap();
     let route: RouteEntry = serde_yaml::from_str(
-        r#"
+        r"
         destination: 192.0.2.1
         metric: 150
         next-hop-address: 2001:db8::2
         next-hop-interface: eth1
         weight: 2
         table-id: 254
-        "#,
+        ",
     )
     .unwrap();
     assert!(absent_route.is_match(&route));
@@ -327,12 +340,12 @@ fn test_route_ipv4_ecmp_is_match() {
 #[test]
 fn test_route_valid_default_gateway() {
     let routes: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0/0
   next-hop-address: 192.0.2.1
   next-hop-interface: eth1
-"#,
+",
     )
     .unwrap();
     routes.validate().unwrap();
@@ -341,12 +354,12 @@ config:
 #[test]
 fn test_route_invalid_destination() {
     let routes1: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0/8
   next-hop-address: 192.0.2.1
   next-hop-interface: eth1
-"#,
+",
     )
     .unwrap();
     let result = routes1.validate();
@@ -354,12 +367,12 @@ config:
     assert_eq!(result.err().unwrap().kind(), ErrorKind::InvalidArgument);
 
     let routes2: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0/f
   next-hop-address: 192.0.2.1
   next-hop-interface: eth1
-"#,
+",
     )
     .unwrap();
     let result = routes2.validate();
@@ -367,12 +380,12 @@ config:
     assert_eq!(result.err().unwrap().kind(), ErrorKind::InvalidArgument);
 
     let routes3: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0
   next-hop-address: 192.0.2.1
   next-hop-interface: eth1
-"#,
+",
     )
     .unwrap();
     let result = routes3.validate();
@@ -380,12 +393,12 @@ config:
     assert_eq!(result.err().unwrap().kind(), ErrorKind::InvalidArgument);
 
     let routes4: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0.0/0
   next-hop-address: 192.0.2.1
   next-hop-interface: eth1
-"#,
+",
     )
     .unwrap();
     let result = routes4.validate();
@@ -393,12 +406,12 @@ config:
     assert_eq!(result.err().unwrap().kind(), ErrorKind::InvalidArgument);
 
     let routes5: Routes = serde_yaml::from_str(
-        r#"
+        r"
 config:
 - destination: 0.0.0.0.0/7
   next-hop-address: 192.0.2.1
   next-hop-interface: eth1
-"#,
+",
     )
     .unwrap();
     let result = routes5.validate();
@@ -416,19 +429,191 @@ fn test_route_matching_empty_via_with_none() {
     )
     .unwrap();
     let not_match_route: RouteEntry = serde_yaml::from_str(
-        r#"
+        r"
         next-hop-address: 2001:db8::2
         next-hop-interface: eth1
+        ",
+    )
+    .unwrap();
+    let match_route: RouteEntry = serde_yaml::from_str(
+        r"
+        destination: 192.0.2.1
+        next-hop-interface: eth1
+        ",
+    )
+    .unwrap();
+    assert!(!absent_route.is_match(&not_match_route));
+    assert!(!absent_route.is_match(&match_route));
+}
+
+#[test]
+fn test_routes_delayed_by_nm() {
+    let route4: RouteEntry = serde_yaml::from_str(
+        r"
+        destination: 192.0.2.1
+        next-hop-interface: eth0
+        ",
+    )
+    .unwrap();
+    let route6: RouteEntry = serde_yaml::from_str(
+        r"
+        destination: 2001:db:1::/64
+        next-hop-interface: eth0
+        ",
+    )
+    .unwrap();
+
+    let current_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+        - name: eth0
+          type: ethernet
+          state: up
+          ipv4:
+            enabled: true
+            dhcp: true
+          ipv6:
+            enabled: true
+            autoconf: true
+        ",
+    )
+    .unwrap();
+
+    assert!(is_route_delayed_by_nm(&route4, &current_ifaces));
+    assert!(is_route_delayed_by_nm(&route6, &current_ifaces));
+}
+
+#[test]
+fn test_routes_not_delayed_by_nm() {
+    let route4: RouteEntry = serde_yaml::from_str(
+        r"
+        destination: 192.0.2.1
+        next-hop-interface: eth0
+        ",
+    )
+    .unwrap();
+    let route6: RouteEntry = serde_yaml::from_str(
+        r"
+        destination: 2001:db:1::/64
+        next-hop-interface: eth0
+        ",
+    )
+    .unwrap();
+
+    let current_ifaces: Interfaces = serde_yaml::from_str(
+        r"---
+        - name: eth0
+          type: ethernet
+          state: up
+          ipv4:
+            enabled: true
+            dhcp: true
+            address:
+              - ip: 192.168.1.10
+                prefix-length: 24
+          ipv6:
+            enabled: true
+            autoconf: true
+            address:
+              - ip: fc00::1
+                prefix-length: 64
+        ",
+    )
+    .unwrap();
+
+    assert!(!is_route_delayed_by_nm(&route4, &current_ifaces));
+    assert!(!is_route_delayed_by_nm(&route6, &current_ifaces));
+}
+
+#[test]
+fn test_route_cwnd_zero_invalid() {
+    let route = serde_yaml::from_str::<RouteEntry>(
+        r"
+        cwnd: 0
+        ",
+    );
+
+    let result = route.expect("Deserialization failed").sanitize();
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidArgument);
+}
+
+#[test]
+fn test_route_cwnd_invalid_type() {
+    let route = serde_yaml::from_str::<RouteEntry>(
+        r"
+        cwnd: -20
+        ",
+    );
+
+    assert!(route.is_err());
+    let err_msg = route.unwrap_err().to_string();
+    assert!(err_msg.contains("cwnd: invalid type"));
+}
+
+#[test]
+fn test_route_cwnd_is_match() {
+    let desired_route: RouteEntry = serde_yaml::from_str(
+        r#"
+        destination: "192.0.2.1"
+        cwnd: 20
+        "#,
+    )
+    .unwrap();
+
+    let not_match_route: RouteEntry = serde_yaml::from_str(
+        r#"
+        destination: "192.0.2.1"
+        "#,
+    )
+    .unwrap();
+    let not_match_route_2: RouteEntry = serde_yaml::from_str(
+        r#"
+        destination: "192.0.2.1"
+        cwnd: 15
         "#,
     )
     .unwrap();
     let match_route: RouteEntry = serde_yaml::from_str(
         r#"
-        destination: 192.0.2.1
-        next-hop-interface: eth1
+        destination: "192.0.2.1"
+        cwnd: 20
         "#,
     )
     .unwrap();
-    assert!(!absent_route.is_match(&not_match_route));
-    assert!(!absent_route.is_match(&match_route));
+
+    assert!(!desired_route.is_match(&not_match_route));
+    assert!(!desired_route.is_match(&not_match_route_2));
+    assert!(desired_route.is_match(&match_route));
+}
+
+#[test]
+fn test_route_without_options_is_match_with_any() {
+    let desired_route: RouteEntry = serde_yaml::from_str(
+        r#"
+        destination: "192.0.2.1"
+        "#,
+    )
+    .unwrap();
+
+    let not_match_route: RouteEntry = serde_yaml::from_str(
+        r#"
+        destination: "192.0.2.100"
+        metric: 1
+        table-id: 2
+        cwnd: 3
+        "#,
+    )
+    .unwrap();
+    let match_route: RouteEntry = serde_yaml::from_str(
+        r#"
+        destination: "192.0.2.1"
+        metric: 1
+        table-id: 2
+        cwnd: 3
+        "#,
+    )
+    .unwrap();
+
+    assert!(!desired_route.is_match(&not_match_route));
+    assert!(desired_route.is_match(&match_route));
 }

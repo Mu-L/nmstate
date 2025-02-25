@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryFrom;
 use std::str::FromStr;
 
 use crate::{NetworkPolicy, NetworkState};
@@ -29,7 +28,7 @@ desiredState:
     )
     .unwrap();
     let current: NetworkState = serde_yaml::from_str(
-        r#"---
+        r"---
         interfaces:
           - name: eth1
             type: ethernet
@@ -45,7 +44,7 @@ desiredState:
             next-hop-address: 192.0.2.1
             next-hop-interface: eth1
           config: []
-        "#,
+        ",
     )
     .unwrap();
 
@@ -97,7 +96,7 @@ desiredState:
     )
     .unwrap();
     let current: NetworkState = serde_yaml::from_str(
-        r#"---
+        r"---
         interfaces:
           - name: eth1
             type: ethernet
@@ -124,7 +123,7 @@ desiredState:
           - destination: 192.51.100.0/24
             next-hop-address: 192.0.2.1
             next-hop-interface: eth1
-        "#,
+        ",
     )
     .unwrap();
 
@@ -183,7 +182,7 @@ fn test_policy_convert_dhcp_to_static_with_dns() {
     )
     .unwrap();
     let current: NetworkState = serde_yaml::from_str(
-        r#"---
+        r"---
         interfaces:
           - name: eth1
             type: ethernet
@@ -193,16 +192,9 @@ fn test_policy_convert_dhcp_to_static_with_dns() {
               address:
               - ip: 192.0.2.251
                 prefix-length: 24
-              dhcp: false
+              dhcp: true
               enabled: true
         routes:
-          config:
-          - destination: 0.0.0.0/0
-            next-hop-address: 192.0.2.1
-            next-hop-interface: eth1
-          - destination: 192.51.100.0/24
-            next-hop-address: 192.0.2.1
-            next-hop-interface: eth1
           running:
           - destination: 0.0.0.0/0
             next-hop-address: 192.0.2.1
@@ -218,7 +210,7 @@ fn test_policy_convert_dhcp_to_static_with_dns() {
             server:
             - 192.51.100.99
             - 2001:db8:1::99
-        "#,
+        ",
     )
     .unwrap();
 
@@ -229,19 +221,15 @@ fn test_policy_convert_dhcp_to_static_with_dns() {
     let ifaces = state.interfaces.to_vec();
     assert_eq!(ifaces.len(), 1);
     assert_eq!(ifaces[0].name(), "eth1");
-    assert!(ifaces[0].base_iface().ipv4.as_ref().unwrap().enabled);
-    let ip_addrs = ifaces[0]
-        .base_iface()
-        .ipv4
-        .as_ref()
-        .unwrap()
-        .addresses
-        .as_ref()
-        .unwrap();
-    assert_eq!(ip_addrs.len(), 1);
-    assert_eq!(
-        ip_addrs[0].ip,
-        std::net::IpAddr::from_str("192.0.2.251").unwrap()
+    assert!(
+        !(*ifaces[0]
+            .base_iface()
+            .ipv4
+            .as_ref()
+            .unwrap()
+            .dhcp
+            .as_ref()
+            .unwrap())
     );
     let routes = state.routes.config.as_ref().unwrap();
     assert_eq!(routes.len(), 2);
@@ -249,7 +237,8 @@ fn test_policy_convert_dhcp_to_static_with_dns() {
     assert_eq!(routes[0].next_hop_iface, Some("eth1".to_string()));
     assert_eq!(routes[1].destination, Some("192.51.100.0/24".to_string()));
     assert_eq!(routes[1].next_hop_iface, Some("eth1".to_string()));
-    let dns_config = state.dns.config.as_ref().unwrap();
+    let dns_config =
+        state.dns.as_ref().and_then(|d| d.config.as_ref()).unwrap();
     assert_eq!(
         dns_config.server,
         Some(vec![
@@ -273,24 +262,24 @@ fn test_policy_empty_policy() {
 #[test]
 fn test_policy_no_capture() {
     let policy: NetworkPolicy = serde_yaml::from_str(
-        r#"
+        r"
         desiredState:
           interfaces:
           - name: eth1
             type: ethernet
             state: up
-        "#,
+        ",
     )
     .unwrap();
 
     let state = NetworkState::try_from(policy).unwrap();
     let expected_state: NetworkState = serde_yaml::from_str(
-        r#"
+        r"
         interfaces:
           - name: eth1
             type: ethernet
             state: up
-        "#,
+        ",
     )
     .unwrap();
     assert_eq!(state, expected_state);

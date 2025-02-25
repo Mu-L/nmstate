@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryFrom;
+use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::IntoDeserializer, Deserialize, Deserializer, Serialize, Serializer,
+};
 
 use crate::{
     deserializer::NumberAsString, BaseInterface, ErrorKind, Interface,
@@ -12,7 +14,9 @@ use crate::{
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
-/// Bond interface. When serializing or deserializing, the [BaseInterface] will
+/// Bond interface.
+///
+/// When serializing or deserializing, the [BaseInterface] will
 /// be flatted and [BondConfig] stored as `link-aggregation` section. The yaml
 /// output [crate::NetworkState] containing an example bond interface:
 /// ```yml
@@ -78,7 +82,7 @@ impl BondInterface {
                 (desired.bond.as_ref(), current.bond.as_ref())
             {
                 if des_bond_conf.mode != cur_bond_conf.mode {
-                    bond_conf.options = des_bond_conf.options.clone();
+                    bond_conf.options.clone_from(&des_bond_conf.options);
                 }
             }
         }
@@ -104,19 +108,90 @@ impl BondInterface {
         }
     }
 
+    fn sort_ports_config(&mut self) {
+        if let Some(ref mut bond_conf) = self.bond {
+            if let Some(ref mut port_conf) = &mut bond_conf.ports_config {
+                port_conf.sort_unstable_by_key(|p| p.name.clone())
+            }
+        }
+    }
+
     pub(crate) fn sanitize(&mut self) -> Result<(), NmstateError> {
         self.sort_ports();
+        self.sort_ports_config();
         self.drop_empty_arp_ip_target();
         self.make_ad_actor_system_mac_upper_case();
+        self.check_overlap_queue_id()?;
+        Ok(())
+    }
+
+    // In kernel code drivers/net/bonding/bond_options.c
+    // bond_option_queue_id_set(), kernel is not allowing multiple bond port
+    // holding the same queue ID, hence we raise error when queue id overlapped.
+    fn check_overlap_queue_id(&self) -> Result<(), NmstateError> {
+        let mut existing_qids: HashMap<u16, &str> = HashMap::new();
+        if let Some(ports_conf) =
+            self.bond.as_ref().and_then(|b| b.ports_config.as_deref())
+        {
+            for port_conf in ports_conf
+                .iter()
+                .filter(|p| p.queue_id.is_some() && p.queue_id != Some(0))
+            {
+                if let Some(queue_id) = port_conf.queue_id {
+                    if let Some(exist_port_name) = existing_qids.get(&queue_id)
+                    {
+                        return Err(NmstateError::new(
+                            ErrorKind::InvalidArgument,
+                            format!(
+                                "Port {} and {} of Bond {} are sharing the \
+                                same queue-id which is not supported by \
+                                linux kernel yet",
+                                exist_port_name,
+                                port_conf.name.as_str(),
+                                self.base.name.as_str()
+                            ),
+                        ));
+                    } else {
+                        existing_qids.insert(queue_id, port_conf.name.as_str());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
     // Return None when desire state does not mention ports
     pub(crate) fn ports(&self) -> Option<Vec<&str>> {
+        let config = self.bond.clone().unwrap_or_default();
+        if config.port.is_some() {
+            self.bond
+                .as_ref()
+                .and_then(|bond_conf| bond_conf.port.as_ref())
+                .map(|ports| {
+                    ports.as_slice().iter().map(|p| p.as_str()).collect()
+                })
+        } else {
+            self.bond
+                .as_ref()
+                .and_then(|bond_conf| bond_conf.ports_config.as_ref())
+                .map(|ports| {
+                    ports.as_slice().iter().map(|p| p.name.as_str()).collect()
+                })
+        }
+    }
+
+    pub(crate) fn get_port_conf(
+        &self,
+        port_name: &str,
+    ) -> Option<&BondPortConfig> {
         self.bond
             .as_ref()
-            .and_then(|bond_conf| bond_conf.port.as_ref())
-            .map(|ports| ports.as_slice().iter().map(|p| p.as_str()).collect())
+            .and_then(|bond_conf| bond_conf.ports_config.as_ref())
+            .and_then(|port_confs| {
+                port_confs
+                    .iter()
+                    .find(|port_conf| port_conf.name == port_name)
+            })
     }
 
     pub(crate) fn mode(&self) -> Option<BondMode> {
@@ -204,6 +279,45 @@ impl BondInterface {
         Ok(())
     }
 
+    fn validate_conflict_in_port_and_port_configs(
+        &self,
+    ) -> Result<(), NmstateError> {
+        let bond_config = self.bond.clone().unwrap_or_default();
+        if bond_config.port.is_some() && bond_config.ports_config.is_some() {
+            let mut port_list = bond_config.port.unwrap_or_default();
+            let mut port_config_list: Vec<String> = bond_config
+                .ports_config
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| p.name)
+                .collect();
+            port_list.sort_unstable();
+            port_config_list.sort_unstable();
+            let matching = port_list
+                .iter()
+                .zip(port_config_list.iter())
+                .filter(|&(port_name, port_config_name)| {
+                    port_name == port_config_name
+                })
+                .count();
+            if matching != port_list.len() || matching != port_config_list.len()
+            {
+                let e = NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    format!(
+                        "The port names specified in `port` conflict with \
+                        the port names specified in `ports-config` for \
+                        bond interface: {}",
+                        &self.base.name
+                    ),
+                );
+                log::error!("{}", e);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn is_options_reset(&self) -> bool {
         if let Some(bond_opts) = self
             .bond
@@ -247,78 +361,126 @@ impl BondInterface {
         origin_name: &str,
         new_name: String,
     ) {
-        if let Some(index) = self
+        if let Some(port_name) = self
             .bond
-            .as_ref()
-            .and_then(|bond_conf| bond_conf.port.as_ref())
+            .as_mut()
+            .and_then(|bond_conf| bond_conf.port.as_mut())
             .and_then(|ports| {
-                ports.iter().position(|port_name| port_name == origin_name)
+                ports
+                    .iter_mut()
+                    .find(|port_name| port_name.as_str() == origin_name)
             })
         {
-            if let Some(ports) = self
-                .bond
-                .as_mut()
-                .and_then(|bond_conf| bond_conf.port.as_mut())
-            {
-                ports[index] = new_name;
+            *port_name = new_name.clone();
+        }
+
+        if let Some(port_conf) = self
+            .bond
+            .as_mut()
+            .and_then(|bond_conf| bond_conf.ports_config.as_mut())
+            .and_then(|port_confs| {
+                port_confs
+                    .iter_mut()
+                    .find(|port_conf| port_conf.name == origin_name)
+            })
+        {
+            port_conf.name = new_name;
+        }
+    }
+
+    pub(crate) fn get_config_changed_ports(&self, current: &Self) -> Vec<&str> {
+        let mut ret: Vec<&str> = Vec::new();
+        let mut des_ports_index: HashMap<&str, &BondPortConfig> =
+            HashMap::new();
+        let mut cur_ports_index: HashMap<&str, &BondPortConfig> =
+            HashMap::new();
+        if let Some(port_confs) = self
+            .bond
+            .as_ref()
+            .and_then(|bond_conf| bond_conf.ports_config.as_ref())
+        {
+            for port_conf in port_confs {
+                des_ports_index.insert(port_conf.name.as_str(), port_conf);
             }
         }
+
+        if let Some(port_confs) = current
+            .bond
+            .as_ref()
+            .and_then(|bond_conf| bond_conf.ports_config.as_ref())
+        {
+            for port_conf in port_confs {
+                cur_ports_index.insert(port_conf.name.as_str(), port_conf);
+            }
+        }
+
+        for (port_name, port_conf) in des_ports_index.iter() {
+            if let Some(cur_port_conf) = cur_ports_index.get(port_name) {
+                if port_conf.is_changed(cur_port_conf) {
+                    ret.push(port_name);
+                }
+            }
+        }
+        ret
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 #[non_exhaustive]
-#[serde(try_from = "NumberAsString")]
+#[serde(remote = "BondMode")]
 /// Bond mode
 pub enum BondMode {
-    #[serde(rename = "balance-rr")]
+    #[serde(rename = "balance-rr", alias = "0")]
     /// Deserialize and serialize from/to `balance-rr`.
     /// You can use integer 0 for deserializing to this mode.
     RoundRobin,
-    #[serde(rename = "active-backup")]
+    #[serde(rename = "active-backup", alias = "1")]
     /// Deserialize and serialize from/to `active-backup`.
     /// You can use integer 1 for deserializing to this mode.
     ActiveBackup,
-    #[serde(rename = "balance-xor")]
+    #[serde(rename = "balance-xor", alias = "2")]
     /// Deserialize and serialize from/to `balance-xor`.
     /// You can use integer 2 for deserializing to this mode.
     XOR,
-    #[serde(rename = "broadcast")]
+    #[serde(rename = "broadcast", alias = "3")]
     /// Deserialize and serialize from/to `broadcast`.
     /// You can use integer 3 for deserializing to this mode.
     Broadcast,
-    #[serde(rename = "802.3ad")]
+    #[serde(rename = "802.3ad", alias = "4")]
     /// Deserialize and serialize from/to `802.3ad`.
     /// You can use integer 4 for deserializing to this mode.
     LACP,
-    #[serde(rename = "balance-tlb")]
+    #[serde(rename = "balance-tlb", alias = "5")]
     /// Deserialize and serialize from/to `balance-tlb`.
     /// You can use integer 5 for deserializing to this mode.
     TLB,
     /// Deserialize and serialize from/to `balance-alb`.
     /// You can use integer 6 for deserializing to this mode.
-    #[serde(rename = "balance-alb")]
+    #[serde(rename = "balance-alb", alias = "6")]
     ALB,
     #[serde(rename = "unknown")]
     Unknown,
 }
 
-impl TryFrom<NumberAsString> for BondMode {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "balance-rr" => Ok(Self::RoundRobin),
-            "1" | "active-backup" => Ok(Self::ActiveBackup),
-            "2" | "balance-xor" => Ok(Self::XOR),
-            "3" | "broadcast" => Ok(Self::Broadcast),
-            "4" | "802.3ad" => Ok(Self::LACP),
-            "5" | "balance-tlb" => Ok(Self::TLB),
-            "6" | "balance-alb" => Ok(Self::ALB),
-            v => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!("Invalid bond mode {v}"),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondMode::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
+    }
+}
+
+impl Serialize for BondMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondMode::serialize(self, serializer)
     }
 }
 
@@ -365,6 +527,14 @@ pub struct BondConfig {
     /// You can also use `ports` for deserializing.
     /// When applying, if defined, it will override current port list.
     pub port: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Deserialize and serialize from/to `ports-config`.
+    /// When applying, if defined, it will override current ports
+    /// configuration. Note that `port` is not required to set with
+    /// `ports-config`. An error will be raised during apply when the port
+    /// names specified in `port` and `ports-config` conflict with each
+    /// other.
+    pub ports_config: Option<Vec<BondPortConfig>>,
 }
 
 impl BondConfig {
@@ -375,43 +545,39 @@ impl BondConfig {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 #[non_exhaustive]
-#[serde(rename_all = "kebab-case")]
-#[serde(try_from = "NumberAsString")]
+#[serde(remote = "BondAdSelect", rename_all = "kebab-case")]
 /// Specifies the 802.3ad aggregation selection logic to use.
 pub enum BondAdSelect {
     /// Deserialize and serialize from/to `stable`.
+    #[serde(alias = "0")]
     Stable,
     /// Deserialize and serialize from/to `bandwidth`.
+    #[serde(alias = "1")]
     Bandwidth,
     /// Deserialize and serialize from/to `count`.
+    #[serde(alias = "2")]
     Count,
 }
 
-impl TryFrom<NumberAsString> for BondAdSelect {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "stable" => Ok(Self::Stable),
-            "1" | "bandwidth" => Ok(Self::Bandwidth),
-            "2" | "count" => Ok(Self::Count),
-            s => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!(
-                    "Invalid bond ad_select value: {s}, should be \
-                    0, stable, 1, bandwidth, 2, or count"
-                ),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondAdSelect {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondAdSelect::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
     }
 }
 
-impl From<BondAdSelect> for u8 {
-    fn from(v: BondAdSelect) -> u8 {
-        match v {
-            BondAdSelect::Stable => 0,
-            BondAdSelect::Bandwidth => 1,
-            BondAdSelect::Count => 2,
-        }
+impl Serialize for BondAdSelect {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondAdSelect::serialize(self, serializer)
     }
 }
 
@@ -430,7 +596,7 @@ impl std::fmt::Display for BondAdSelect {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-#[serde(rename_all = "kebab-case", try_from = "NumberAsString")]
+#[serde(rename_all = "kebab-case", remote = "BondLacpRate")]
 #[non_exhaustive]
 /// Option specifying the rate in which we'll ask our link partner to transmit
 /// LACPDU packets in 802.3ad mode
@@ -438,27 +604,34 @@ pub enum BondLacpRate {
     /// Request partner to transmit LACPDUs every 30 seconds.
     /// Serialize to `slow`.
     /// Deserialize from 0 or `slow`.
+    #[serde(alias = "0")]
     Slow,
     /// Request partner to transmit LACPDUs every 1 second
     /// Serialize to `fast`.
     /// Deserialize from 1 or `fast`.
+    #[serde(alias = "1")]
     Fast,
 }
 
-impl TryFrom<NumberAsString> for BondLacpRate {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "slow" => Ok(Self::Slow),
-            "1" | "fast" => Ok(Self::Fast),
-            v => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!(
-                    "Invalid bond lacp-rate {v}, should be \
-                    0, slow, 1 or fast"
-                ),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondLacpRate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondLacpRate::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
+    }
+}
+
+impl Serialize for BondLacpRate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondLacpRate::serialize(self, serializer)
     }
 }
 
@@ -476,7 +649,7 @@ impl std::fmt::Display for BondLacpRate {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
-#[serde(rename_all = "kebab-case", try_from = "NumberAsString")]
+#[serde(rename_all = "kebab-case", remote = "BondAllPortsActive")]
 #[non_exhaustive]
 /// Equal to kernel `all_slaves_active` option.
 /// Specifies that duplicate frames (received on inactive ports) should be
@@ -485,27 +658,34 @@ pub enum BondAllPortsActive {
     /// Drop the duplicate frames
     /// Serialize to `dropped`.
     /// Deserialize from 0 or `dropped`.
+    #[serde(alias = "0")]
     Dropped,
     /// Deliver the duplicate frames
     /// Serialize to `delivered`.
     /// Deserialize from 1 or `delivered`.
+    #[serde(alias = "1")]
     Delivered,
 }
 
-impl TryFrom<NumberAsString> for BondAllPortsActive {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "dropped" => Ok(Self::Dropped),
-            "1" | "delivered" => Ok(Self::Delivered),
-            v => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!(
-                    "Invalid all_slaves_active value: {v}, should be \
-                    0, dropped, 1 or delivered"
-                ),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondAllPortsActive {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondAllPortsActive::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
+    }
+}
+
+impl Serialize for BondAllPortsActive {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondAllPortsActive::serialize(self, serializer)
     }
 }
 
@@ -531,35 +711,43 @@ impl From<BondAllPortsActive> for u8 {
     }
 }
 
+/// The `arp_all_targets` kernel bond option.
+///
+/// Specifies the quantity of arp_ip_targets that must be reachable in order for
+/// the ARP monitor to consider a port as being up. This option affects only
+/// active-backup mode for ports with arp_validation enabled.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-#[serde(rename_all = "kebab-case", try_from = "NumberAsString")]
+#[serde(rename_all = "kebab-case", remote = "BondArpAllTargets")]
 #[non_exhaustive]
-/// The `arp_all_targets` kernel bond option: Specifies the quantity of
-/// arp_ip_targets that must be reachable in order for the ARP monitor to
-/// consider a port as being up. This option affects only active-backup mode
-/// for ports with arp_validation enabled.
 pub enum BondArpAllTargets {
     /// consider the port up only when any of the `arp_ip_targets` is reachable
+    #[serde(alias = "0")]
     Any,
     /// consider the port up only when all of the `arp_ip_targets` are
     /// reachable
+    #[serde(alias = "1")]
     All,
 }
 
-impl TryFrom<NumberAsString> for BondArpAllTargets {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "any" => Ok(Self::Any),
-            "1" | "all" => Ok(Self::All),
-            v => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!(
-                    "Invalid arp_all_targets value {v}, should be \
-                    0, any, 1 or all"
-                ),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondArpAllTargets {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondArpAllTargets::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
+    }
+}
+
+impl Serialize for BondArpAllTargets {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondArpAllTargets::serialize(self, serializer)
     }
 }
 
@@ -576,66 +764,73 @@ impl std::fmt::Display for BondArpAllTargets {
     }
 }
 
+/// The `arp_validate` kernel bond option.
+///
+/// Specifies whether or not ARP probes and replies should be validated in any
+/// mode that supports arp monitoring, or whether non-ARP traffic should be
+/// filtered (disregarded) for link monitoring purposes.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-#[serde(rename_all = "snake_case", try_from = "NumberAsString")]
+#[serde(rename_all = "snake_case", remote = "BondArpValidate")]
 #[non_exhaustive]
-/// The `arp_validate` kernel bond option: Specifies whether or not ARP probes
-/// and replies should be validated in any mode that supports arp monitoring, or
-/// whether non-ARP traffic should be filtered (disregarded) for link monitoring
-/// purposes.
 pub enum BondArpValidate {
     /// No validation or filtering is performed.
     /// Serialize to `none`.
     /// Deserialize from 0 or `none`.
+    #[serde(alias = "0")]
     None,
     /// Validation is performed only for the active port.
     /// Serialize to `active`.
     /// Deserialize from 1 or `active`.
+    #[serde(alias = "1")]
     Active,
     /// Validation is performed only for backup ports.
     /// Serialize to `backup`.
     /// Deserialize from 2 or `backup`.
+    #[serde(alias = "2")]
     Backup,
     /// Validation is performed for all ports.
     /// Serialize to `all`.
     /// Deserialize from 3 or `all`.
+    #[serde(alias = "3")]
     All,
     /// Filtering is applied to all ports. No validation is performed.
     /// Serialize to `filter`.
     /// Deserialize from 4 or `filter`.
+    #[serde(alias = "4")]
     Filter,
     /// Filtering is applied to all ports, validation is performed only for
     /// the active port.
     /// Serialize to `filter_active`.
     /// Deserialize from 5 or `filter-active`.
+    #[serde(alias = "5")]
     FilterActive,
     /// Filtering is applied to all ports, validation is performed only for
     /// backup port.
     /// Serialize to `filter_backup`.
     /// Deserialize from 6 or `filter_backup`.
+    #[serde(alias = "6")]
     FilterBackup,
 }
 
-impl TryFrom<NumberAsString> for BondArpValidate {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "none" => Ok(Self::None),
-            "1" | "active" => Ok(Self::Active),
-            "2" | "backup" => Ok(Self::Backup),
-            "3" | "all" => Ok(Self::All),
-            "4" | "filter" => Ok(Self::Filter),
-            "5" | "filter_active" => Ok(Self::FilterActive),
-            "6" | "filter_backup" => Ok(Self::FilterBackup),
-            v => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!(
-                    "Invalid arp_validate value {v}, should be \
-                    0, none, 1, active, 2, backup, 3, all, 4, filter, 5, \
-                    filter_active, 6 or filter_backup"
-                ),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondArpValidate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondArpValidate::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
+    }
+}
+
+impl Serialize for BondArpValidate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondArpValidate::serialize(self, serializer)
     }
 }
 
@@ -657,19 +852,22 @@ impl std::fmt::Display for BondArpValidate {
     }
 }
 
+/// The `fail_over_mac` kernel bond option.
+///
+/// Specifies whether active-backup mode should set all ports to the same MAC
+/// address at port attachment (the traditional behavior), or, when enabled,
+/// perform special handling of the bond's MAC address in accordance with the
+/// selected policy.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
-#[serde(rename_all = "kebab-case", try_from = "NumberAsString")]
+#[serde(rename_all = "kebab-case", remote = "BondFailOverMac")]
 #[non_exhaustive]
-/// The `fail_over_mac` kernel bond option: Specifies whether active-backup mode
-/// should set all ports to the same MAC address at port attachment (the
-/// traditional behavior), or, when enabled, perform special handling of the
-/// bond's MAC address in accordance with the selected policy.
 pub enum BondFailOverMac {
     /// This setting disables fail_over_mac, and causes bonding to set all
     /// ports of an active-backup bond to the same MAC address at attachment
     /// time.
     /// Serialize to `none`.
     /// Deserialize from 0 or `none`.
+    #[serde(alias = "0")]
     None,
     /// The "active" fail_over_mac policy indicates that the MAC address of the
     /// bond should always be the MAC address of the currently active port.
@@ -677,6 +875,7 @@ pub enum BondFailOverMac {
     /// of the bond changes during a failover.
     /// Serialize to `active`.
     /// Deserialize from 1 or `active`.
+    #[serde(alias = "1")]
     Active,
     /// The "follow" fail_over_mac policy causes the MAC address of the bond to
     /// be selected normally (normally the MAC address of the first port added
@@ -686,24 +885,29 @@ pub enum BondFailOverMac {
     /// port receives the newly active port's MAC address).
     /// Serialize to `follow`.
     /// Deserialize from 2 or `follow`.
+    #[serde(alias = "2")]
     Follow,
 }
 
-impl TryFrom<NumberAsString> for BondFailOverMac {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "none" => Ok(Self::None),
-            "1" | "active" => Ok(Self::Active),
-            "2" | "follow" => Ok(Self::Follow),
-            v => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!(
-                    "Invalid fail_over_mac value: {v}, should be \
-                    0, none, 1, active, 2 or follow"
-                ),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondFailOverMac {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondFailOverMac::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
+    }
+}
+
+impl Serialize for BondFailOverMac {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondFailOverMac::serialize(self, serializer)
     }
 }
 
@@ -721,50 +925,57 @@ impl std::fmt::Display for BondFailOverMac {
     }
 }
 
+/// The `primary_reselect` kernel bond option.
+///
+/// Specifies the reselection policy for the primary port. This affects how the
+/// primary port is chosen to become the active port when failure of the active
+/// port or recovery of the primary port occurs. This option is designed to
+/// prevent flip-flopping between the primary port and other ports.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
-#[serde(rename_all = "kebab-case", try_from = "NumberAsString")]
+#[serde(rename_all = "kebab-case", remote = "BondPrimaryReselect")]
 #[non_exhaustive]
-/// The `primary_reselect` kernel bond option: Specifies the reselection policy
-/// for the primary port. This affects how the primary port is chosen to
-/// become the active port when failure of the active port or recovery of the
-/// primary port occurs. This option is designed to prevent flip-flopping
-/// between the primary port and other ports.
 pub enum BondPrimaryReselect {
     ///The primary port becomes the active port whenever it comes back up.
     /// Serialize to `always`.
     /// Deserialize from 0 or `always`.
+    #[serde(alias = "0")]
     Always,
     /// The primary port becomes the active port when it comes back up, if the
     /// speed and duplex of the primary port is better than the speed and
     /// duplex of the current active port.
     /// Serialize to `better`.
     /// Deserialize from 1 or `better`.
+    #[serde(alias = "1")]
     Better,
     /// The primary port becomes the active port only if the current active
     /// port fails and the primary port is up.
     /// Serialize to `failure`.
     /// Deserialize from 2 or `failure`.
+    #[serde(alias = "2")]
     Failure,
 }
 
-impl TryFrom<NumberAsString> for BondPrimaryReselect {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "always" => Ok(Self::Always),
-            "1" | "better" => Ok(Self::Better),
-            "2" | "failure" => Ok(Self::Failure),
-            v => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!(
-                    "Invalid primary_reselect vlaue {v}, should be \
-                    0, always, 1, better, 2 or failure"
-                ),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondPrimaryReselect {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondPrimaryReselect::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
     }
 }
 
+impl Serialize for BondPrimaryReselect {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondPrimaryReselect::serialize(self, serializer)
+    }
+}
 impl std::fmt::Display for BondPrimaryReselect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -779,70 +990,59 @@ impl std::fmt::Display for BondPrimaryReselect {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
-#[serde(try_from = "NumberAsString")]
+/// The `xmit_hash_policy` kernel bond option.
+///
+/// Selects the transmit hash policy to use for port selection in balance-xor,
+/// 802.3ad, and tlb modes.
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy)]
 #[non_exhaustive]
-/// The `xmit_hash_policy` kernel bond option: Selects the transmit hash policy
-/// to use for port selection in balance-xor, 802.3ad, and tlb modes.
+#[serde(remote = "BondXmitHashPolicy")]
 pub enum BondXmitHashPolicy {
-    #[serde(rename = "layer2")]
+    #[serde(rename = "layer2", alias = "0")]
     /// Serialize to `layer2`.
     /// Deserialize from 0 or `layer2`.
     Layer2,
-    #[serde(rename = "layer3+4")]
+    #[serde(rename = "layer3+4", alias = "1")]
     /// Serialize to `layer3+4`.
     /// Deserialize from 1 or `layer3+4`.
     Layer34,
-    #[serde(rename = "layer2+3")]
+    #[serde(rename = "layer2+3", alias = "2")]
     /// Serialize to `layer2+3`.
     /// Deserialize from 2 or `layer2+3`.
     Layer23,
-    #[serde(rename = "encap2+3")]
+    #[serde(rename = "encap2+3", alias = "3")]
     /// Serialize to `encap2+3`.
     /// Deserialize from 3 or `encap2+3`.
     Encap23,
-    #[serde(rename = "encap3+4")]
+    #[serde(rename = "encap3+4", alias = "4")]
     /// Serialize to `encap3+4`.
     /// Deserialize from 4 or `encap3+4`.
     Encap34,
-    #[serde(rename = "vlan+srcmac")]
+    #[serde(rename = "vlan+srcmac", alias = "5")]
     /// Serialize to `vlan+srcmac`.
     /// Deserialize from 5 or `vlan+srcmac`.
     VlanSrcMac,
 }
 
-impl TryFrom<NumberAsString> for BondXmitHashPolicy {
-    type Error = NmstateError;
-    fn try_from(s: NumberAsString) -> Result<Self, NmstateError> {
-        match s.as_str() {
-            "0" | "layer2" => Ok(Self::Layer2),
-            "1" | "layer3+4" => Ok(Self::Layer34),
-            "2" | "layer2+3" => Ok(Self::Layer23),
-            "3" | "encap2+3" => Ok(Self::Encap23),
-            "4" | "encap3+4" => Ok(Self::Encap34),
-            "5" | "vlan+srcmac" => Ok(Self::VlanSrcMac),
-            v => Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                format!(
-                    "Invalid xmit_hash_policy value {v}, should be \
-                    0, layer2, 1, layer34, 2, layer23, 3, encap2+3, 4, \
-                    encap3+4, 5, vlan+srcmac"
-                ),
-            )),
-        }
+impl<'de> Deserialize<'de> for BondXmitHashPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        BondXmitHashPolicy::deserialize(
+            NumberAsString::deserialize(deserializer)?
+                .as_str()
+                .into_deserializer(),
+        )
     }
 }
 
-impl BondXmitHashPolicy {
-    pub fn to_u8(&self) -> u8 {
-        match self {
-            Self::Layer2 => 0,
-            Self::Layer34 => 1,
-            Self::Layer23 => 2,
-            Self::Encap23 => 3,
-            Self::Encap34 => 4,
-            Self::VlanSrcMac => 5,
-        }
+impl Serialize for BondXmitHashPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BondXmitHashPolicy::serialize(self, serializer)
     }
 }
 
@@ -947,7 +1147,6 @@ pub struct BondOptions {
     /// is 0.
     pub arp_interval: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-
     /// Specifies the IP addresses to use as ARP monitoring peers when
     /// arp_interval is > 0. These are the targets of the ARP request sent to
     /// determine the health of the link to the targets. Specify these values
@@ -1170,6 +1369,12 @@ pub struct BondOptions {
         alias = "balance-slb"
     )]
     pub balance_slb: Option<bool>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "crate::deserializer::option_u8_or_string"
+    )]
+    pub arp_missed_max: Option<u8>,
 }
 
 impl BondOptions {
@@ -1246,6 +1451,7 @@ impl MergedInterface {
             apply_iface
                 .validate_new_iface_with_no_mode(self.current.as_ref())?;
             apply_iface.validate_mac_restricted_mode(self.current.as_ref())?;
+            apply_iface.validate_conflict_in_port_and_port_configs()?;
 
             if let Some(bond_opts) =
                 apply_iface.bond.as_ref().and_then(|b| b.options.as_ref())
@@ -1274,5 +1480,53 @@ impl MergedInterface {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub struct BondPortConfig {
+    /// name is mandatory when specifying the ports configuration.
+    pub name: String,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "crate::deserializer::option_i32_or_string"
+    )]
+    /// Deserialize and serialize from/to `priority`.
+    /// When applying, if defined, it will override the current bond port
+    /// priority. The verification will fail if bonding mode is not
+    /// active-backup(1) or balance-tlb (5) or balance-alb (6).
+    pub priority: Option<i32>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "crate::deserializer::option_u16_or_string"
+    )]
+    /// Deserialize and serialize from/to `queue-id`.
+    pub queue_id: Option<u16>,
+}
+
+impl std::fmt::Display for BondPortConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "BondPortConfig {{ name: {}, priority: {}, queue_id: {} }}",
+            self.name,
+            self.priority.unwrap_or_default(),
+            self.queue_id.unwrap_or_default()
+        )
+    }
+}
+
+impl BondPortConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn is_changed(&self, current: &Self) -> bool {
+        (self.priority.is_some() && self.priority != current.priority)
+            || (self.queue_id.is_some() && self.queue_id != current.queue_id)
     }
 }

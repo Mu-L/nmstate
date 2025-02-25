@@ -2,7 +2,6 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::convert::TryFrom;
 
 use serde::{
     ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer,
@@ -39,7 +38,7 @@ pub struct BridgePortVlanConfig {
     )]
     /// Trunk tags.
     /// Deserialize and serialize from/to `trunk-tags`.
-    pub trunk_tags: Option<Vec<BridgePortTunkTag>>,
+    pub trunk_tags: Option<Vec<BridgePortTrunkTag>>,
 }
 
 impl BridgePortVlanConfig {
@@ -66,7 +65,7 @@ impl BridgePortVlanConfig {
     pub(crate) fn sort_trunk_tags(&mut self) {
         if let Some(trunk_tags) = self.trunk_tags.as_mut() {
             trunk_tags.sort_unstable_by(|tag_a, tag_b| match (tag_a, tag_b) {
-                (BridgePortTunkTag::Id(a), BridgePortTunkTag::Id(b)) => {
+                (BridgePortTrunkTag::Id(a), BridgePortTrunkTag::Id(b)) => {
                     a.cmp(b)
                 }
                 _ => {
@@ -85,12 +84,12 @@ impl BridgePortVlanConfig {
             let mut new_trunk_tags = Vec::new();
             for trunk_tag in trunk_tags {
                 match trunk_tag {
-                    BridgePortTunkTag::Id(_) => {
+                    BridgePortTrunkTag::Id(_) => {
                         new_trunk_tags.push(trunk_tag.clone())
                     }
-                    BridgePortTunkTag::IdRange(range) => {
+                    BridgePortTrunkTag::IdRange(range) => {
                         for i in range.min..range.max + 1 {
-                            new_trunk_tags.push(BridgePortTunkTag::Id(i));
+                            new_trunk_tags.push(BridgePortTrunkTag::Id(i));
                         }
                     }
                 };
@@ -99,57 +98,61 @@ impl BridgePortVlanConfig {
         }
     }
 
-    pub(crate) fn sanitize(&self) -> Result<(), NmstateError> {
-        if self.mode == Some(BridgePortVlanMode::Trunk)
-            && self.tag.is_some()
-            && self.tag != Some(0)
-            && self.enable_native != Some(true)
-        {
-            return Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                "Bridge VLAN filtering `tag` cannot be use \
-                in trunk mode without `enable-native`"
-                    .to_string(),
-            ));
-        }
+    pub(crate) fn sanitize(
+        &self,
+        is_desired: bool,
+    ) -> Result<(), NmstateError> {
+        if is_desired {
+            if self.mode == Some(BridgePortVlanMode::Trunk)
+                && self.tag.is_some()
+                && self.tag != Some(0)
+                && self.enable_native != Some(true)
+            {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    "Bridge VLAN filtering `tag` cannot be use \
+                    in trunk mode without `enable-native`"
+                        .to_string(),
+                ));
+            }
 
-        if self.mode == Some(BridgePortVlanMode::Access)
-            && self.enable_native == Some(true)
-        {
-            return Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                "Bridge VLAN filtering `enable-native: true` cannot be set \
-                in access mode"
-                    .to_string(),
-            ));
-        }
+            if self.mode == Some(BridgePortVlanMode::Access)
+                && self.enable_native == Some(true)
+            {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    "Bridge VLAN filtering `enable-native: true` \
+                    cannot be set in access mode"
+                        .to_string(),
+                ));
+            }
 
-        if self.mode == Some(BridgePortVlanMode::Access) {
-            if let Some(tags) = self.trunk_tags.as_ref() {
-                if !tags.is_empty() {
-                    return Err(NmstateError::new(
-                        ErrorKind::InvalidArgument,
-                        "Bridge VLAN filtering access mode cannot have \
-                        trunk-tags defined"
-                            .to_string(),
-                    ));
+            if self.mode == Some(BridgePortVlanMode::Access) {
+                if let Some(tags) = self.trunk_tags.as_ref() {
+                    if !tags.is_empty() {
+                        return Err(NmstateError::new(
+                            ErrorKind::InvalidArgument,
+                            "Bridge VLAN filtering access mode cannot have \
+                            trunk-tags defined"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
-        }
 
-        if self.mode == Some(BridgePortVlanMode::Trunk)
-            && self.trunk_tags.is_none()
-        {
-            return Err(NmstateError::new(
-                ErrorKind::InvalidArgument,
-                "Bridge VLAN filtering trunk mode cannot have \
+            if self.mode == Some(BridgePortVlanMode::Trunk)
+                && self.trunk_tags.is_none()
+            {
+                return Err(NmstateError::new(
+                    ErrorKind::InvalidArgument,
+                    "Bridge VLAN filtering trunk mode cannot have \
                 empty trunk-tags"
-                    .to_string(),
-            ));
-        }
-
-        if let Some(tags) = self.trunk_tags.as_ref() {
-            validate_overlap_trunk_tags(tags)?;
+                        .to_string(),
+                ));
+            }
+            if let Some(tags) = self.trunk_tags.as_ref() {
+                validate_overlap_trunk_tags(tags)?;
+            }
         }
 
         Ok(())
@@ -188,7 +191,7 @@ impl std::fmt::Display for BridgePortVlanMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
-pub enum BridgePortTunkTag {
+pub enum BridgePortTrunkTag {
     #[serde(deserialize_with = "crate::deserializer::u16_or_string")]
     /// Single VLAN trunk ID
     Id(u16),
@@ -196,7 +199,7 @@ pub enum BridgePortTunkTag {
     IdRange(BridgePortVlanRange),
 }
 
-impl std::fmt::Display for BridgePortTunkTag {
+impl std::fmt::Display for BridgePortTrunkTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Id(d) => write!(f, "id={d}"),
@@ -207,7 +210,7 @@ impl std::fmt::Display for BridgePortTunkTag {
     }
 }
 
-impl<'de> Deserialize<'de> for BridgePortTunkTag {
+impl<'de> Deserialize<'de> for BridgePortTrunkTag {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -217,20 +220,20 @@ impl<'de> Deserialize<'de> for BridgePortTunkTag {
             if let Some(id) = id.as_str() {
                 Ok(Self::Id(id.parse::<u16>().map_err(|e| {
                     serde::de::Error::custom(format!(
-                        "Failed to parse BridgePortTunkTag id \
+                        "Failed to parse BridgePortTrunkTag id \
                         {id} as u16: {e}"
                     ))
                 })?))
             } else if let Some(id) = id.as_u64() {
                 Ok(Self::Id(u16::try_from(id).map_err(|e| {
                     serde::de::Error::custom(format!(
-                        "Failed to parse BridgePortTunkTag id \
+                        "Failed to parse BridgePortTrunkTag id \
                         {id} as u16: {e}"
                     ))
                 })?))
             } else {
                 Err(serde::de::Error::custom(format!(
-                    "The id of BridgePortTunkTag should be \
+                    "The id of BridgePortTrunkTag should be \
                     unsigned 16 bits integer, but got {v}"
                 )))
             }
@@ -241,7 +244,7 @@ impl<'de> Deserialize<'de> for BridgePortTunkTag {
             ))
         } else {
             Err(serde::de::Error::custom(format!(
-                "BridgePortTunkTag only support 'id' or 'id-range', \
+                "BridgePortTrunkTag only support 'id' or 'id-range', \
                 but got {v}"
             )))
         }
@@ -249,7 +252,7 @@ impl<'de> Deserialize<'de> for BridgePortTunkTag {
 }
 
 fn bridge_trunk_tags_serialize<S>(
-    tags: &Option<Vec<BridgePortTunkTag>>,
+    tags: &Option<Vec<BridgePortTrunkTag>>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -259,12 +262,12 @@ where
         let mut serial_list = serializer.serialize_tuple(tags.len())?;
         for tag in tags {
             match tag {
-                BridgePortTunkTag::Id(id) => {
+                BridgePortTrunkTag::Id(id) => {
                     let mut map = HashMap::new();
                     map.insert("id", id);
                     serial_list.serialize_element(&map)?;
                 }
-                BridgePortTunkTag::IdRange(id_range) => {
+                BridgePortTrunkTag::IdRange(id_range) => {
                     let mut map = HashMap::new();
                     map.insert("id-range", id_range);
                     serial_list.serialize_element(&map)?;
@@ -277,7 +280,7 @@ where
     }
 }
 
-impl BridgePortTunkTag {
+impl BridgePortTrunkTag {
     pub fn get_vlan_tag_range(&self) -> (u16, u16) {
         match self {
             Self::Id(min) => (*min, *min),
@@ -299,12 +302,12 @@ pub struct BridgePortVlanRange {
 }
 
 fn validate_overlap_trunk_tags(
-    tags: &[BridgePortTunkTag],
+    tags: &[BridgePortTrunkTag],
 ) -> Result<(), NmstateError> {
-    let mut found: HashMap<u16, &BridgePortTunkTag> = HashMap::new();
+    let mut found: HashMap<u16, &BridgePortTrunkTag> = HashMap::new();
     for tag in tags {
         match tag {
-            BridgePortTunkTag::Id(d) => match found.entry(*d) {
+            BridgePortTrunkTag::Id(d) => match found.entry(*d) {
                 Entry::Occupied(o) => {
                     let existing_tag = o.get();
                     return Err(NmstateError::new(
@@ -320,7 +323,7 @@ fn validate_overlap_trunk_tags(
                 }
             },
 
-            BridgePortTunkTag::IdRange(range) => {
+            BridgePortTrunkTag::IdRange(range) => {
                 for i in range.min..range.max + 1 {
                     match found.entry(i) {
                         Entry::Occupied(o) => {

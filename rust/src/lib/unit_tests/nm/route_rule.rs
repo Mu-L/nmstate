@@ -87,7 +87,7 @@ fn test_add_rules_to_new_interface() {
 #[test]
 fn test_route_rule_ignore_absent_ifaces() {
     let desired: NetworkState = serde_yaml::from_str(
-        r#"
+        r"
 interfaces:
 - name: br0
   state: absent
@@ -96,12 +96,12 @@ route-rules:
   config:
   - route-table: 200
     state: absent
-"#,
+",
     )
     .unwrap();
 
     let current: NetworkState = serde_yaml::from_str(
-        r#"
+        r"
 interfaces:
 - name: eth1
   type: ethernet
@@ -132,7 +132,7 @@ route-rules:
   config:
     - ip-from: 192.51.100.2/32
       route-table: 200
-"#,
+",
     )
     .unwrap();
 
@@ -164,7 +164,7 @@ route-rules:
 #[test]
 fn test_route_rule_use_auto_route_table_id() {
     let current: NetworkState = serde_yaml::from_str(
-        r#"
+        r"
 ---
 interfaces:
   - name: br0
@@ -185,12 +185,12 @@ interfaces:
     bridge:
       port:
         - name: br0
-"#,
+",
     )
     .unwrap();
 
     let desired: NetworkState = serde_yaml::from_str(
-        r#"
+        r"
 ---
 route-rules:
   config:
@@ -200,19 +200,22 @@ route-rules:
     - route-table: 500
       priority: 3200
       ip-from: 192.0.3.0/24
-"#,
+interfaces:
+  - name: br0
+    type: ovs-interface
+",
     )
     .unwrap();
 
     let expected_rules: Vec<RouteRuleEntry> = serde_yaml::from_str(
-        r#"
+        r"
 - route-table: 500
   priority: 3200
   ip-to: 192.0.3.0/24
 - route-table: 500
   priority: 3200
   ip-from: 192.0.3.0/24
-"#,
+",
     )
     .unwrap();
 
@@ -239,7 +242,7 @@ route-rules:
 #[test]
 fn test_route_rule_use_default_auto_route_table_id() {
     let current: NetworkState = serde_yaml::from_str(
-        r#"
+        r"
 ---
 interfaces:
   - name: eth1
@@ -253,32 +256,32 @@ interfaces:
       auto-gateway: true
     ipv6:
       enabled: false
-"#,
+",
     )
     .unwrap();
 
     let desired: NetworkState = serde_yaml::from_str(
-        r#"
----
-route-rules:
-  config:
-    - priority: 3200
-      ip-to: 192.0.3.0/24
-    - priority: 3200
-      ip-from: 192.0.3.0/24
-"#,
+        r"---
+        route-rules:
+          config:
+            - priority: 3200
+              ip-to: 192.0.3.0/24
+            - priority: 3200
+              ip-from: 192.0.3.0/24
+        interfaces:
+          - name: eth1",
     )
     .unwrap();
 
     let expected_rules: Vec<RouteRuleEntry> = serde_yaml::from_str(
-        r#"
+        r"
 - route-table: 254
   priority: 3200
   ip-to: 192.0.3.0/24
 - route-table: 254
   priority: 3200
   ip-from: 192.0.3.0/24
-"#,
+",
     )
     .unwrap();
 
@@ -304,29 +307,27 @@ route-rules:
 #[test]
 fn test_route_rule_use_loopback() {
     let current: NetworkState = serde_yaml::from_str(
-        r#"
----
-interfaces:
-  - name: lo
-    type: loopback
-    state: up
-    mtu: 65536
-    ipv4:
-      enabled: true
-      address:
-      - ip: 127.0.0.1
-        prefix-length: 8
-    ipv6:
-      enabled: true
-      address:
-      - ip: ::1
-        prefix-length: 128
-"#,
+        r"---
+        interfaces:
+          - name: lo
+            type: loopback
+            state: up
+            mtu: 65536
+            ipv4:
+              enabled: true
+              address:
+              - ip: 127.0.0.1
+                prefix-length: 8
+            ipv6:
+              enabled: true
+              address:
+              - ip: ::1
+                prefix-length: 128",
     )
     .unwrap();
 
     let desired: NetworkState = serde_yaml::from_str(
-        r#"---
+        r"---
         route-rules:
           config:
             - priority: 3200
@@ -334,23 +335,23 @@ interfaces:
               family: ipv4
             - priority: 3200
               route-table: 255
-              family: ipv6"#,
+              family: ipv6",
     )
     .unwrap();
 
     let expected_ipv4_rules: Vec<RouteRuleEntry> = serde_yaml::from_str(
-        r#"
+        r"
         - priority: 3200
           route-table: 255
-          family: ipv4"#,
+          family: ipv4",
     )
     .unwrap();
 
     let expected_ipv6_rules: Vec<RouteRuleEntry> = serde_yaml::from_str(
-        r#"
+        r"
         - priority: 3200
           route-table: 255
-          family: ipv6"#,
+          family: ipv6",
     )
     .unwrap();
 
